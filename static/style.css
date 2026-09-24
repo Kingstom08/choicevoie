@@ -1,0 +1,182 @@
+:root{--bg:#14161a;--panel:#1d2026;--line:#2c313a;--fg:#e6e8ec;--mut:#9aa2b1;--acc:#4f8cff;--danger:#e0574f;--ok:#3fbf6f;--warn:#e0b34f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+.topbar{background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px}
+.brand{color:var(--fg);text-decoration:none;font-weight:700;font-size:18px}
+.container{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:22px;margin:0 0 14px}
+h2{font-size:17px;margin:0 0 12px}
+a{color:var(--acc)}
+.muted{color:var(--mut);font-size:13px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:18px}
+.alert{background:#3a2020;border:1px solid var(--danger);color:#ffb9b4;padding:10px 12px;border-radius:6px;margin-bottom:14px}
+.btn{display:inline-block;background:#2b303a;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 13px;text-decoration:none;cursor:pointer;font-size:14px}
+.btn:hover{background:#353b47}
+.btn-primary{background:var(--acc);border-color:var(--acc);color:#fff}
+.btn-danger{background:transparent;border-color:var(--danger);color:#ff9a93}
+.form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+.form label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mut)}
+input,textarea,select{background:#12141a;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:7px 9px;font:inherit}
+input[type=number]{width:110px}
+input[type=text],textarea{min-width:240px}
+textarea{resize:vertical}
+.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+video{width:100%;max-width:720px;background:#000;border-radius:8px;display:block}
+.player-wrap{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:18px}
+.subtitle-box{margin:14px 0;min-height:56px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:20px;font-weight:600;background:#0e1014;border:1px solid var(--line);border-radius:8px;padding:12px}
+.audio-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--mut);font-size:13px}
+.audio-row audio{height:34px}
+.cue-table{width:100%;border-collapse:collapse;font-size:14px}
+.cue-table th,.cue-table td{border-bottom:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:middle}
+.cue-table th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase}
+.cue-row{cursor:pointer}
+.cue-row:hover{background:#242932}
+.cue-table audio{height:30px;max-width:220px}
+.admin-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+.admin-video,.admin-panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+@media(max-width:900px){.admin-layout{grid-template-columns:1fr}}
+
+/* --- section tabs --- */
+.tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.tab{color:var(--mut);text-decoration:none;padding:9px 14px;font-size:14px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--fg)}
+.tab.active{color:var(--fg);border-bottom-color:var(--acc);font-weight:600}
+
+/* --- dub page layout --- */
+.dub-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
+@media(max-width:900px){.dub-layout{grid-template-columns:1fr}}
+.subtitle-box-lg{font-size:26px;min-height:80px}
+
+/* --- live waveform / recording --- */
+.wave-box{position:relative;margin-top:12px;border:2px solid var(--line);border-radius:8px;overflow:hidden;background:#0e1014}
+.wave-box canvas{display:block;width:100%;height:140px}
+.wave-box.recording{border-color:var(--danger);animation:rec-pulse 1s infinite}
+@keyframes rec-pulse{0%,100%{border-color:var(--danger)}50%{border-color:#7a2a26}}
+.rec-badge{position:absolute;top:8px;left:8px;background:rgba(224,87,79,.9);color:#fff;font-size:12px;font-weight:700;padding:4px 9px;border-radius:20px;letter-spacing:.03em}
+.countdown{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:64px;font-weight:800;color:#fff;background:rgba(0,0,0,.45)}
+
+.level-bar{margin-top:8px;height:10px;border-radius:5px;background:#0e1014;border:1px solid var(--line);overflow:hidden}
+.level-fill{height:100%;width:0;background:var(--mut);transition:width .06s linear}
+.level-fill.level-quiet{background:#4a4f58}
+.level-fill.level-ok{background:var(--ok)}
+.level-fill.level-hot{background:var(--danger)}
+
+/* --- cue status / progress --- */
+.status-dot{font-size:13px;white-space:nowrap}
+.status-dot.status-empty{color:var(--mut)}
+.status-dot.status-filled{color:var(--ok);font-weight:600}
+.progress-text{color:var(--mut);font-size:13px;margin:0 0 10px}
+
+/* --- badges --- */
+.badge{display:inline-block;font-size:12px;font-weight:600;padding:3px 9px;border-radius:20px;border:1px solid transparent}
+.badge-ok{background:rgba(63,191,111,.15);color:var(--ok);border-color:var(--ok)}
+.badge-warn{background:rgba(224,179,79,.15);color:var(--warn);border-color:var(--warn)}
+.badge-err{background:rgba(224,87,79,.15);color:#ff9a93;border-color:var(--danger)}
+.badge-muted{background:rgba(154,162,177,.12);color:var(--mut);border-color:var(--line)}
+
+/* --- panel titles / section labels --- */
+.panel-title{font-size:12px;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 6px}
+
+/* --- toolbar (üst araç çubuğu) --- */
+.toolbar{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.toolbar .btn{white-space:nowrap}
+.toolbar label{display:flex;align-items:center;gap:6px;font-size:13px}
+
+/* --- kısayol yardım kutusu --- */
+.shortcut-help{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin-bottom:18px;font-size:13px;color:var(--mut)}
+.shortcut-help ul{margin:8px 0 8px;padding-left:18px}
+.shortcut-help li{margin-bottom:4px}
+.shortcut-help kbd{background:#2b303a;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:12px;color:var(--fg);font-family:inherit}
+
+/* --- video zaman eksenli ses şeridi --- */
+.wave-timeline{position:relative;margin-top:8px;border:2px solid var(--line);border-radius:8px;overflow:hidden;background:#0e1014;cursor:pointer}
+.wave-timeline canvas{display:block;width:100%;height:110px}
+.wave-status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:13px;background:#0e1014;z-index:3;pointer-events:none;text-align:center;padding:0 12px}
+.cue-regions{position:absolute;inset:0;z-index:1;pointer-events:none}
+.cue-region{position:absolute;top:0;bottom:0;border:1px solid transparent;background:rgba(224,179,79,.18);cursor:pointer;pointer-events:auto}
+.cue-region.filled{background:rgba(63,191,111,.18)}
+.cue-region:hover{background:rgba(79,140,255,.22)}
+.cue-region.active{border-color:var(--acc);background:rgba(79,140,255,.28)}
+.cue-region:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+.cue-region span{position:absolute;top:2px;left:3px;font-size:10px;color:#fff;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.8);pointer-events:none}
+.wave-playhead{position:absolute;top:0;bottom:0;width:2px;background:var(--danger);left:0;z-index:2;pointer-events:none}
+.wave-labels{position:relative;height:16px;margin-top:4px;font-size:11px;color:var(--mut)}
+.wave-labels span{position:absolute;transform:translateX(-50%)}
+
+/* --- seçili replik satırı --- */
+.cue-row-active{background:#242932;outline:1px solid var(--acc)}
+
+/* --- ilerleme çubuğu --- */
+.progress-bar{height:8px;border-radius:4px;background:#0e1014;border:1px solid var(--line);overflow:hidden;margin-bottom:12px}
+.progress-fill{height:100%;width:0;background:var(--ok);transition:width .2s ease}
+
+/* --- süre uyarı rozeti --- */
+.warn-badge{display:inline-block;margin-left:6px;font-size:11px;font-weight:600;color:var(--warn);background:rgba(224,179,79,.15);border:1px solid var(--warn);border-radius:20px;padding:1px 8px;white-space:nowrap}
+
+/* --- mikrofon cihaz seçici --- */
+.device-select{max-width:280px}
+
+@media(max-width:900px){
+    .toolbar{flex-direction:column;align-items:flex-start;gap:10px}
+}
+
+/* --- admin: saniye bağlantıları / özet / vurgu (yeni satır) --- */
+.time-link{background:transparent;border:1px solid var(--line);color:var(--acc);border-radius:5px;padding:3px 9px;font:inherit;font-size:13px;cursor:pointer}
+.time-link:hover{background:#242932;border-color:var(--acc)}
+.time-link:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.cue-summary{color:var(--mut);font-size:13px;margin:0 0 10px}
+.row-highlight{animation:row-flash 1.6s ease}
+@keyframes row-flash{0%{background:rgba(63,191,111,.35)}100%{background:transparent}}
+
+/* --- ses ayırma (admin) --- */
+.sep-status{height:8px;border-radius:4px;background:#0e1014;border:1px solid var(--line);overflow:hidden;position:relative}
+.sep-status.sep-running div{position:absolute;top:0;bottom:0;width:35%;background:var(--acc);animation:sep-indeterminate 1.2s ease-in-out infinite}
+@keyframes sep-indeterminate{0%{left:-35%}100%{left:100%}}
+.sep-info{margin-top:10px;font-size:13px;color:var(--mut);background:#12141a;border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+code{background:#12141a;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-family:Consolas,monospace;font-size:13px;color:var(--fg)}
+
+/* --- dublaj: arka planı koru seçeneği --- */
+.checkbox-row{display:flex;flex-direction:column;gap:4px;font-size:13px}
+.checkbox-row label{display:flex;align-items:center;gap:6px;color:var(--fg)}
+
+/* --- başarı bildirimi (içe aktarma vb.) --- */
+.alert-ok{background:#1f3a26;border:1px solid var(--ok);color:#bdf5d3}
+
+/* --- ses ayırma: belirli (determinate) ilerleme çubuğu --- */
+.sep-meta{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px;font-size:13px}
+.sep-progress{height:8px;border-radius:4px;background:#0e1014;border:1px solid var(--line);overflow:hidden;margin-bottom:8px}
+.sep-progress-fill{height:100%;width:0;background:var(--acc);transition:width .3s ease}
+.sep-eta{margin:6px 0 0}
+
+/* --- ses ayırma: cihaz rozeti --- */
+.device-badge{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;border:1px solid transparent;letter-spacing:.03em}
+.device-gpu{background:rgba(63,191,111,.15);color:var(--ok);border-color:var(--ok)}
+.device-cpu{background:rgba(154,162,177,.15);color:var(--mut);border-color:var(--line)}
+
+/* --- ses ayırma: eski (stale) durum uyarısı --- */
+.sep-stale{background:rgba(224,179,79,.1);border:1px solid var(--warn);border-radius:6px;padding:10px 12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.sep-stale p{margin:0;color:var(--warn);flex:1 1 240px}
+
+/* --- replikleri paylaş: dışa aktarma satırı --- */
+.share-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.btn-download{background:#2b303a;border:1px solid var(--acc);color:var(--fg)}
+.btn-download:hover{background:#353b47}
+.btn-download:disabled{opacity:.5;cursor:not-allowed}
+.btn-download:disabled:hover{background:#2b303a}
+
+/* --- tek aralık transkripsiyonu (Yeni Cue Ekle formu) --- */
+.transcribe-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.lang-select{max-width:170px}
+
+/* --- replikleri otomatik oluştur (kart) --- */
+.auto-cue-card .source-option{border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-bottom:10px;background:#12141a}
+.auto-cue-card .source-option label{display:flex;align-items:center;gap:8px;color:var(--fg);font-weight:600;cursor:pointer}
+.auto-cue-card .source-option p{margin:6px 0 0}
+.auto-cue-card .source-option input[type=url]{width:100%;margin-top:8px;min-width:0}
+.auto-cue-card .source-option.disabled{opacity:.55}
+.auto-cue-card .mode-label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mut);margin-bottom:10px}
+#autoLangNote{margin:0 0 12px}
+
+/* --- replikleri otomatik oluştur: ilerleme (sep-progress ile aynı desen) --- */
+.auto-progress{height:8px;border-radius:4px;background:#0e1014;border:1px solid var(--line);overflow:hidden;margin-bottom:8px}
+.auto-progress-fill{height:100%;width:0;background:var(--acc);transition:width .3s ease}

@@ -1,0 +1,15 @@
+# Apple Silicon (M1 / M2 / M3 / M4) icin ek adim.
+# ONCE requirements.txt kurulmus olmali:
+#     pip install -r requirements.txt
+#     pip install -r requirements-mac.txt
+#
+# Ne yapar:
+#   - PyTorch zaten demucs ile birlikte gelir ve Metal (MPS) destegi
+#     iceride hazirdir; ayrica bir sey kurmaya gerek yok.
+#   - ctranslate2'nin (faster-whisper'in motoru) Metal destegi YOKTUR,
+#     yani faster-whisper macOS'ta her zaman CPU'da calisir.
+#     mlx-whisper Apple'in Neural Engine'ini kullanir; kuruluysa uygulama
+#     transkripsiyon icin otomatik olarak onu tercih eder, yoksa
+#     faster-whisper'a (CPU) duser.
+
+mlx-whisper

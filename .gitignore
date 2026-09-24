@@ -1,0 +1,28 @@
+# --- Kullanici verisi: asla depoya girmez ---
+uploads/
+outputs/
+choosvoie.db
+choosvoie.db-journal
+_backup/
+
+# --- ffmpeg ikilisi (imageio-ffmpeg her platformda kendi surumunu getirir) ---
+bin/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Ortam / editor / isletim sistemi ---
+.env
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Gecici ---
+*.log
+*.tmp

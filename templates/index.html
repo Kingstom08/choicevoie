@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Videolar - Choos Voie{% endblock %}
+{% block content %}
+<h1>Videolar</h1>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+    <h2>Yeni Video Yükle</h2>
+    <form action="/upload" method="post" enctype="multipart/form-data" class="form">
+        <label>Başlık
+            <input type="text" name="title" required>
+        </label>
+        <label>Video dosyası (mp4, webm, mov, m4v)
+            <input type="file" name="video" accept=".mp4,.webm,.mov,.m4v" required>
+        </label>
+        <button type="submit">Yükle</button>
+    </form>
+</section>
+
+<section class="card">
+    <h2>YouTube'dan İndir (480p)</h2>
+    <form action="/download" method="post" class="form" id="ytForm">
+        <label>YouTube linki
+            <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=..." required style="min-width:340px">
+        </label>
+        <label>Başlık (boş bırakılırsa video adı kullanılır)
+            <input type="text" name="title">
+        </label>
+        <button type="submit" id="ytBtn">İndir</button>
+    </form>
+    <p class="muted">İndirme birkaç dakika sürebilir; sayfa o sırada bekler. Sadece hakkına sahip olduğun ya da izin verilen içerikleri indir.</p>
+    <script>
+    document.getElementById('ytForm').addEventListener('submit', function () {
+        var b = document.getElementById('ytBtn');
+        b.disabled = true; b.textContent = 'İndiriliyor...';
+    });
+    </script>
+</section>
+
+<section class="card">
+    <h2>Video Listesi</h2>
+    {% if videos %}
+    <table class="cue-table">
+        <thead>
+            <tr><th>Başlık</th><th>Yüklenme Tarihi</th><th>İşlemler</th></tr>
+        </thead>
+        <tbody>
+            {% for v in videos %}
+            <tr>
+                <td>{{ v.title }}</td>
+                <td>{{ v.created_at }}</td>
+                <td class="actions">
+                    <a href="/admin/{{ v.id }}" class="btn">Admin panel</a>
+                    <a href="/dub/{{ v.id }}" class="btn btn-primary">Dublaj yap</a>
+                    <a href="/takes/{{ v.id }}" class="btn">Öncekiler</a>
+                    <form action="/video/{{ v.id }}/delete" method="post" onsubmit="return confirm('Video silinsin mi?');">
+                        <button type="submit" class="btn btn-danger">Sil</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Henüz video yüklenmedi.</p>
+    {% endif %}
+</section>
+{% endblock %}

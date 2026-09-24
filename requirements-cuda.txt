@@ -1,0 +1,19 @@
+# NVIDIA GPU icin ek adim (Windows / Linux).
+# ONCE requirements.txt kurulmus olmali:
+#     pip install -r requirements.txt
+#     pip install -r requirements-cuda.txt
+#
+# Ne yapar:
+#   - PyTorch'un CUDA 13.0 surumunu kurar (Demucs bunu -d cuda ile kullanir).
+#   - faster-whisper'in motoru ctranslate2, PyTorch'tan AYRI bir CUDA calisma
+#     zamani ister; cublas/cudnn paketleri onun icin. Uygulama bu DLL
+#     klasorlerini acilista kendisi PATH'e ekler (_add_nvidia_dll_path).
+#
+# Not: torch surumu sabitlenmistir. Farkli bir Python surumunde wheel
+# bulunamazsa sabitlemeyi kaldirip sadece "torch" yazmayi deneyin.
+
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+torch==2.14.0+cu130
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

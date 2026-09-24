@@ -1,0 +1,908 @@
+{% extends "base.html" %}
+{% block title %}Admin - {{ video.title }}{% endblock %}
+{% block content %}
+<h1>Admin: {{ video.title }}</h1>
+{% set active = 'admin' %}
+{% include "_tabs.html" %}
+<p><a href="/" class="btn">Video listesi</a></p>
+
+<div id="alertBox" class="alert"{% if not error %} hidden{% endif %}>{{ error or '' }}</div>
+
+<div class="admin-layout">
+    <div class="admin-video">
+        <video id="adminVideo" controls>
+            <source src="/media/{{ video.filename }}">
+        </video>
+    </div>
+
+    <div class="admin-panel">
+        <section class="card">
+            <h2>Yeni Cue Ekle</h2>
+            <form id="cueForm" action="/admin/{{ video.id }}/cue" method="post" class="form">
+                <label>Başlangıç (sn)
+                    <input type="number" step="0.1" min="0" name="start_sec" id="startInput" required>
+                </label>
+                <button type="button" id="btnGetStart">Şu anki zamanı al (başlangıç)</button>
+
+                <label>Bitiş (sn)
+                    <input type="number" step="0.1" min="0" name="end_sec" id="endInput" required>
+                </label>
+                <button type="button" id="btnGetEnd">Şu anki zamanı al (bitiş)</button>
+
+                <div class="transcribe-row">
+                    <button type="button" id="btnTranscribe">🎙 Transkribe Et</button>
+                    <select id="langSelect" class="lang-select">
+                        <option value="auto" selected>Otomatik algıla</option>
+                        <option value="tr">Türkçe</option>
+                        <option value="en">İngilizce</option>
+                        <option value="de">Almanca</option>
+                        <option value="fr">Fransızca</option>
+                        <option value="es">İspanyolca</option>
+                        <option value="ru">Rusça</option>
+                        <option value="ar">Arapça</option>
+                    </select>
+                </div>
+                <label>Metin
+                    <textarea name="text" id="cueText" rows="3" required></textarea>
+                </label>
+                <button type="submit">Cue Ekle</button>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>Cue Listesi</h2>
+            <p class="cue-summary" id="cueSummary">{{ cues|length }} replik · toplam {{ '%.1f'|format(cues|sum(attribute='end_sec') - cues|sum(attribute='start_sec')) }} sn</p>
+            <table class="cue-table" id="cueTable"{% if not cues %} hidden{% endif %}>
+                <thead>
+                    <tr><th>Başlangıç</th><th>Bitiş</th><th>Süre</th><th>Metin</th><th></th></tr>
+                </thead>
+                <tbody id="cueTbody">
+                    {% for c in cues %}
+                    <tr class="cue-row" data-id="{{ c.id }}" data-start="{{ c.start_sec }}">
+                        <td><button type="button" class="time-link" data-time="{{ c.start_sec }}" title="{{ '%.1f'|format(c.start_sec) }} saniyeye git" aria-label="{{ '%.1f'|format(c.start_sec) }} saniyeye git">{{ '%.1f'|format(c.start_sec) }} sn</button></td>
+                        <td><button type="button" class="time-link" data-time="{{ c.end_sec }}" title="{{ '%.1f'|format(c.end_sec) }} saniyeye git" aria-label="{{ '%.1f'|format(c.end_sec) }} saniyeye git">{{ '%.1f'|format(c.end_sec) }} sn</button></td>
+                        <td>{{ '%.1f'|format(c.end_sec - c.start_sec) }} sn</td>
+                        <td>{{ c.text }}</td>
+                        <td>
+                            <form action="/cue/{{ c.id }}/delete" method="post" class="cue-delete-form">
+                                <button type="submit" class="btn btn-danger">Sil</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <p class="muted" id="cueEmpty"{% if cues %} hidden{% endif %}>Henüz cue eklenmedi.</p>
+        </section>
+    </div>
+</div>
+
+<section class="card">
+    <h2>Ses Ayırma (konuşma / arka plan)</h2>
+    <p class="muted">Videonun sesinden konuşmayı ayırıp arka planı (müzik, efekt) elde eder. Böylece dublajda replik aralığında müzik susmaz.</p>
+
+    <div id="sepNone">
+        <p class="muted">Henüz ayrıştırılmadı.</p>
+        <button type="button" id="sepStartBtn" class="btn btn-primary">Sesi Ayrıştır</button>
+    </div>
+
+    <div id="sepRunning" hidden>
+        <div class="sep-meta">
+            <span id="sepStageText" class="muted">Ayrıştırılıyor…</span>
+            <span id="sepPercentText" class="muted"></span>
+        </div>
+        <div class="sep-progress" id="sepProgressWrap" hidden>
+            <div class="sep-progress-fill" id="sepProgressFill"></div>
+        </div>
+        <div class="sep-status sep-running" id="sepIndeterminate"><div></div></div>
+        <p class="sep-eta muted" id="sepEtaText">süre hesaplanıyor…</p>
+        <p id="sepDeviceRow"></p>
+    </div>
+
+    <div id="sepStale" hidden>
+        <div class="sep-stale">
+            <p>Replikler ayrıştırmadan sonra değişti. Arka plan sesi yeni replikleri kapsamıyor.</p>
+            <button type="button" id="sepResepBtn" class="btn btn-primary">Yeniden Ayrıştır</button>
+        </div>
+        <audio controls id="sepStaleAudio" style="display:block;margin-top:10px;max-width:420px"></audio>
+    </div>
+
+    <div id="sepDone" hidden>
+        <p>
+            <span class="badge badge-ok">Hazır · yöntem: <span id="sepMethodLabel"></span></span>
+            <span id="sepDoneDeviceBadge"></span>
+        </p>
+        <p class="muted" id="sepCueCountText"></p>
+        <audio controls id="sepAudio" style="display:block;margin-top:10px;max-width:420px"></audio>
+        <div class="actions" style="margin-top:10px">
+            <button type="button" id="sepDeleteBtn" class="btn btn-danger">Ayrıştırmayı Sil</button>
+        </div>
+    </div>
+
+    <div id="sepError" hidden>
+        <div class="alert" id="sepErrorMsg"></div>
+        <button type="button" id="sepRetryBtn" class="btn">Tekrar Dene</button>
+    </div>
+
+    <div id="sepDemucsInfo" class="sep-info" hidden>
+        Şu an hafif yöntem kullanılıyor (stereo videolarda çalışır). Daha temiz ayrım için: <code>pip install demucs</code> — ~2.5 GB indirme gerektirir.
+    </div>
+</section>
+
+<section class="card auto-cue-card">
+    <h2>Replikleri Otomatik Oluştur</h2>
+    <p class="muted">Videodaki konuşmaları bulup replikleri zaman damgalarıyla birlikte kendisi oluşturur. Elle replik girmene gerek kalmaz.</p>
+
+    <div id="autoCueForm">
+        <div class="source-option" id="sourceYoutubeOption">
+            <label>
+                <input type="radio" name="autoSource" value="youtube" id="sourceYoutube">
+                YouTube altyazısı
+            </label>
+            <p class="muted">Video YouTube'dan indirildiyse ve altyazısı varsa en doğru sonucu verir; zaman damgaları birebir.</p>
+            <input type="url" id="youtubeUrlInput" placeholder="https://www.youtube.com/watch?v=..." value="{{ video.source_url or '' }}">
+        </div>
+
+        <div class="source-option" id="sourceWhisperOption">
+            <label>
+                <input type="radio" name="autoSource" value="whisper" id="sourceWhisper" checked>
+                Whisper ile dinle
+            </label>
+            <p class="muted">Her videoda çalışır, internet gerekmez. Video uzunluğuna göre biraz sürer.</p>
+        </div>
+
+        <label class="mode-label">Mod
+            <select id="autoModeSelect">
+                <option value="append" selected>Mevcutlara ekle</option>
+                <option value="replace">Hepsini değiştir</option>
+            </select>
+        </label>
+
+        <p class="muted" id="autoLangNote">Dil: <span id="autoLangDisplay">Otomatik algıla</span> (yukarıdaki "Yeni Cue Ekle" formundaki dil seçiciyle değiştirilir)</p>
+
+        <div class="actions">
+            <button type="button" id="autoStartBtn" class="btn btn-primary">Replikleri Oluştur</button>
+        </div>
+    </div>
+
+    <div id="autoRunning" hidden>
+        <div class="sep-meta">
+            <span id="autoStageText" class="muted">Başlatılıyor…</span>
+            <span id="autoPercentText" class="muted"></span>
+        </div>
+        <div class="sep-progress" id="autoProgressWrap" hidden>
+            <div class="sep-progress-fill" id="autoProgressFill"></div>
+        </div>
+        <div class="sep-status sep-running" id="autoIndeterminate"><div></div></div>
+        <p id="autoDeviceRow"></p>
+    </div>
+
+    <div id="autoDone" class="alert alert-ok" hidden></div>
+
+    <div id="autoError" hidden>
+        <div class="alert" id="autoErrorMsg"></div>
+        <button type="button" id="autoRetryBtn" class="btn">Tekrar Dene</button>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Replikleri Paylaş</h2>
+    <p class="muted">Hazırladığın replik listesini indirip başkasına gönderebilirsin. Karşı taraf aynı videoyu açıp bu dosyayı yükleyerek dublaj yapabilir.</p>
+
+    <div class="share-row">
+        {% if cues %}
+        <a href="/video/{{ video.id }}/cues/export.json" download class="btn btn-download">JSON indir</a>
+        <span class="muted">Bu uygulamaya geri yüklenebilir</span>
+        {% else %}
+        <button type="button" class="btn btn-download" disabled>JSON indir</button>
+        <span class="muted">Önce replik eklemelisin.</span>
+        {% endif %}
+    </div>
+    <div class="share-row">
+        {% if cues %}
+        <a href="/video/{{ video.id }}/cues/export.srt" download class="btn btn-download">SRT indir</a>
+        <span class="muted">Standart altyazı formatı, her yerde açılır</span>
+        {% else %}
+        <button type="button" class="btn btn-download" disabled>SRT indir</button>
+        <span class="muted">Önce replik eklemelisin.</span>
+        {% endif %}
+    </div>
+
+    <p class="panel-title">İçe Aktar</p>
+    <form id="importForm" action="/admin/{{ video.id }}/cues/import" method="post" enctype="multipart/form-data" class="form">
+        <label>Dosya
+            <input type="file" name="file" id="importFile" accept=".json,.srt" required>
+        </label>
+        <label>Mod
+            <select name="mode" id="importMode">
+                <option value="append" selected>Mevcutlara ekle</option>
+                <option value="replace">Hepsini değiştir</option>
+            </select>
+        </label>
+        <button type="submit" id="importSubmitBtn">İçe Aktar</button>
+    </form>
+</section>
+
+<script>
+(function () {
+    var videoId = {{ video.id }};
+    var video = document.getElementById('adminVideo');
+    var form = document.getElementById('cueForm');
+    var submitBtn = form.querySelector('button[type="submit"]');
+    var startInput = document.getElementById('startInput');
+    var endInput = document.getElementById('endInput');
+    var alertBox = document.getElementById('alertBox');
+    var table = document.getElementById('cueTable');
+    var tbody = document.getElementById('cueTbody');
+    var emptyMsg = document.getElementById('cueEmpty');
+    var summaryEl = document.getElementById('cueSummary');
+
+    document.getElementById('btnGetStart').addEventListener('click', function () {
+        startInput.value = video.currentTime.toFixed(1);
+    });
+    document.getElementById('btnGetEnd').addEventListener('click', function () {
+        endInput.value = video.currentTime.toFixed(1);
+    });
+
+    function fmt(n) {
+        return Number(n).toFixed(1);
+    }
+
+    function showError(msg) {
+        alertBox.classList.remove('alert-ok');
+        alertBox.textContent = msg;
+        alertBox.hidden = false;
+    }
+
+    function showOk(msg) {
+        alertBox.classList.add('alert-ok');
+        alertBox.textContent = msg;
+        alertBox.hidden = false;
+    }
+
+    function clearError() {
+        alertBox.classList.remove('alert-ok');
+        alertBox.textContent = '';
+        alertBox.hidden = true;
+    }
+
+    function makeTimeLink(t) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'time-link';
+        btn.dataset.time = t;
+        var label = fmt(t) + ' saniyeye git';
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+        btn.textContent = fmt(t) + ' sn';
+        return btn;
+    }
+
+    function renderCues(cues, highlightId) {
+        var sorted = cues.slice().sort(function (a, b) { return a.start_sec - b.start_sec; });
+        tbody.innerHTML = '';
+
+        sorted.forEach(function (c) {
+            var tr = document.createElement('tr');
+            tr.className = 'cue-row';
+            tr.dataset.id = c.id;
+            tr.dataset.start = c.start_sec;
+
+            var tdStart = document.createElement('td');
+            tdStart.appendChild(makeTimeLink(c.start_sec));
+
+            var tdEnd = document.createElement('td');
+            tdEnd.appendChild(makeTimeLink(c.end_sec));
+
+            var tdDur = document.createElement('td');
+            tdDur.textContent = fmt(c.end_sec - c.start_sec) + ' sn';
+
+            var tdText = document.createElement('td');
+            tdText.textContent = c.text;
+
+            var tdActions = document.createElement('td');
+            var delForm = document.createElement('form');
+            delForm.action = '/cue/' + c.id + '/delete';
+            delForm.method = 'post';
+            delForm.className = 'cue-delete-form';
+            var delBtn = document.createElement('button');
+            delBtn.type = 'submit';
+            delBtn.className = 'btn btn-danger';
+            delBtn.textContent = 'Sil';
+            delForm.appendChild(delBtn);
+            tdActions.appendChild(delForm);
+
+            tr.appendChild(tdStart);
+            tr.appendChild(tdEnd);
+            tr.appendChild(tdDur);
+            tr.appendChild(tdText);
+            tr.appendChild(tdActions);
+
+            if (highlightId != null && String(c.id) === String(highlightId)) {
+                tr.classList.add('row-highlight');
+                setTimeout(function () { tr.classList.remove('row-highlight'); }, 1600);
+            }
+
+            tbody.appendChild(tr);
+        });
+
+        if (sorted.length === 0) {
+            table.hidden = true;
+            emptyMsg.hidden = false;
+        } else {
+            table.hidden = false;
+            emptyMsg.hidden = true;
+        }
+
+        var total = sorted.reduce(function (sum, c) { return sum + (c.end_sec - c.start_sec); }, 0);
+        summaryEl.textContent = sorted.length + ' replik · toplam ' + fmt(total) + ' sn';
+    }
+
+    function loadCues() {
+        return fetch('/api/video/' + videoId + '/cues').then(function (res) {
+            return res.json();
+        });
+    }
+
+    function parseParamFromUrl(url, key) {
+        var marker = key + '=';
+        var idx = url.indexOf(marker);
+        if (idx === -1) return null;
+        var raw = url.slice(idx + marker.length);
+        var amp = raw.indexOf('&');
+        if (amp !== -1) raw = raw.slice(0, amp);
+        try {
+            return decodeURIComponent(raw.replace(/\+/g, ' '));
+        } catch (e) {
+            return raw;
+        }
+    }
+
+    function parseErrorFromUrl(url) {
+        return parseParamFromUrl(url, 'error');
+    }
+
+    function parseOkFromUrl(url) {
+        return parseParamFromUrl(url, 'ok');
+    }
+
+    // Saniye düğmeleri ve satıra tıklama (silme düğmesi/formu hariç) - event delegation
+    tbody.addEventListener('click', function (e) {
+        var timeBtn = e.target.closest('.time-link');
+        if (timeBtn) {
+            var t = parseFloat(timeBtn.dataset.time);
+            if (!isNaN(t)) video.currentTime = t;
+            return;
+        }
+        if (e.target.closest('form')) return;
+        var row = e.target.closest('tr[data-id]');
+        if (row) {
+            var st = parseFloat(row.dataset.start);
+            if (!isNaN(st)) video.currentTime = st;
+        }
+    });
+
+    // Silme formu - sayfa yenilemeden
+    tbody.addEventListener('submit', function (e) {
+        var delForm = e.target.closest('form.cue-delete-form');
+        if (!delForm) return;
+        e.preventDefault();
+        if (!confirm('Cue silinsin mi?')) return;
+        var btn = delForm.querySelector('button');
+        if (btn) btn.disabled = true;
+        fetch(delForm.action, { method: 'POST' })
+            .then(loadCues)
+            .then(function (cues) { renderCues(cues); })
+            .catch(function () { showError('Silme işlemi başarısız oldu.'); })
+            .finally(function () { if (btn) btn.disabled = false; });
+    });
+
+    // Cue ekleme formu - sayfa yenilemeden, video pozisyonu korunur
+    form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        clearError();
+        submitBtn.disabled = true;
+        var originalLabel = submitBtn.textContent;
+        submitBtn.textContent = 'Ekleniyor…';
+
+        var fd = new FormData(form);
+        fetch(form.action, { method: 'POST', body: fd })
+            .then(function (res) {
+                var errMsg = parseErrorFromUrl(res.url);
+                if (errMsg) {
+                    showError(errMsg);
+                    return null;
+                }
+                form.reset();
+                return loadCues();
+            })
+            .then(function (cues) {
+                if (!cues) return;
+                var newest = null;
+                cues.forEach(function (c) {
+                    if (newest === null || c.id > newest.id) newest = c;
+                });
+                renderCues(cues, newest ? newest.id : null);
+            })
+            .catch(function () {
+                showError('Cue eklenirken bir hata oluştu.');
+            })
+            .finally(function () {
+                submitBtn.disabled = false;
+                submitBtn.textContent = originalLabel;
+            });
+    });
+
+    // ---- Tek aralık transkripsiyonu ----
+    var btnTranscribe = document.getElementById('btnTranscribe');
+    var cueText = document.getElementById('cueText');
+    var langSelect = document.getElementById('langSelect');
+
+    if (btnTranscribe) {
+        btnTranscribe.addEventListener('click', function () {
+            clearError();
+
+            var startVal = startInput.value;
+            var endVal = endInput.value;
+            if (startVal === '' || endVal === '') {
+                showError('Transkribe için önce başlangıç ve bitiş saniyesini gir.');
+                return;
+            }
+            var start = parseFloat(startVal);
+            var end = parseFloat(endVal);
+            if (isNaN(start) || isNaN(end)) {
+                showError('Başlangıç/bitiş değerleri geçersiz.');
+                return;
+            }
+            if (end <= start) {
+                showError('Bitiş, başlangıçtan büyük olmalı.');
+                return;
+            }
+            var dur = end - start;
+            if (dur < 0.3 || dur > 120) {
+                showError('Transkribe aralığı 0.3 - 120 saniye arasında olmalı.');
+                return;
+            }
+            if (cueText.value.trim() !== '') {
+                if (!confirm('Metin kutusunda zaten yazı var, üzerine yazılsın mı?')) return;
+            }
+
+            btnTranscribe.disabled = true;
+            var originalLabel = btnTranscribe.textContent;
+            btnTranscribe.textContent = 'Transkribe ediliyor…';
+
+            fetch('/api/video/' + videoId + '/transcribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ start_sec: start, end_sec: end, language: langSelect.value })
+            })
+                .then(function (res) {
+                    if (!res.ok) throw new Error('http ' + res.status);
+                    return res.json();
+                })
+                .then(function (data) {
+                    if (data && data.ok) {
+                        cueText.value = data.text || '';
+                        cueText.focus();
+                    } else {
+                        showError((data && data.error) || 'Transkripsiyon başarısız oldu.');
+                    }
+                })
+                .catch(function () {
+                    showError('Transkripsiyon sırasında bir hata oluştu (sunucu erişilemedi ya da özellik henüz etkin değil).');
+                })
+                .finally(function () {
+                    btnTranscribe.disabled = false;
+                    btnTranscribe.textContent = originalLabel;
+                });
+        });
+    }
+
+    // ---- Ses Ayırma (konuşma / arka plan) ----
+    var sepNoneBox = document.getElementById('sepNone');
+    var sepRunningBox = document.getElementById('sepRunning');
+    var sepStaleBox = document.getElementById('sepStale');
+    var sepDoneBox = document.getElementById('sepDone');
+    var sepErrorBox = document.getElementById('sepError');
+    var sepErrorMsg = document.getElementById('sepErrorMsg');
+    var sepDemucsInfo = document.getElementById('sepDemucsInfo');
+    var sepStartBtn = document.getElementById('sepStartBtn');
+    var sepRetryBtn = document.getElementById('sepRetryBtn');
+    var sepResepBtn = document.getElementById('sepResepBtn');
+    var sepDeleteBtn = document.getElementById('sepDeleteBtn');
+    var sepMethodLabel = document.getElementById('sepMethodLabel');
+    var sepDoneDeviceBadge = document.getElementById('sepDoneDeviceBadge');
+    var sepCueCountText = document.getElementById('sepCueCountText');
+    var sepAudio = document.getElementById('sepAudio');
+    var sepStaleAudio = document.getElementById('sepStaleAudio');
+    var sepStageText = document.getElementById('sepStageText');
+    var sepPercentText = document.getElementById('sepPercentText');
+    var sepProgressWrap = document.getElementById('sepProgressWrap');
+    var sepProgressFill = document.getElementById('sepProgressFill');
+    var sepIndeterminate = document.getElementById('sepIndeterminate');
+    var sepEtaText = document.getElementById('sepEtaText');
+    var sepDeviceRow = document.getElementById('sepDeviceRow');
+    var sepPollTimer = null;
+
+    function sepMethodLabelText(m) {
+        if (m === 'demucs') return 'Demucs';
+        if (m === 'light') return 'Hafif (merkez kanal)';
+        return m || 'bilinmiyor';
+    }
+
+    function formatEta(sec) {
+        if (sec == null || isNaN(sec)) return 'süre hesaplanıyor…';
+        sec = Math.max(0, Math.round(sec));
+        if (sec < 60) return 'yaklaşık ' + sec + ' sn kaldı';
+        var min = Math.floor(sec / 60);
+        var rem = sec % 60;
+        if (rem === 0) return 'yaklaşık ' + min + ' dk kaldı';
+        return 'yaklaşık ' + min + ' dk ' + rem + ' sn kaldı';
+    }
+
+    function buildDeviceBadge(device) {
+        if (device !== 'cuda' && device !== 'cpu') return null;
+        var span = document.createElement('span');
+        span.className = 'device-badge ' + (device === 'cuda' ? 'device-gpu' : 'device-cpu');
+        span.textContent = device === 'cuda' ? 'GPU' : 'CPU';
+        return span;
+    }
+
+    function showSepPanel(name) {
+        sepNoneBox.hidden = name !== 'none';
+        sepRunningBox.hidden = name !== 'running';
+        sepStaleBox.hidden = name !== 'stale';
+        sepDoneBox.hidden = name !== 'done';
+        sepErrorBox.hidden = name !== 'error';
+    }
+
+    function stopSepPolling() {
+        if (sepPollTimer) {
+            clearInterval(sepPollTimer);
+            sepPollTimer = null;
+        }
+    }
+
+    function applySepStatus(data) {
+        if (!data) return;
+        sepDemucsInfo.hidden = data.demucs_available !== false;
+
+        if (data.status === 'running') {
+            sepStageText.textContent = data.stage || 'Ayrıştırılıyor…';
+            if (typeof data.progress === 'number') {
+                var pct = Math.min(100, Math.max(0, data.progress));
+                sepPercentText.textContent = '%' + Math.round(pct);
+                sepProgressWrap.hidden = false;
+                sepIndeterminate.hidden = true;
+                sepProgressFill.style.width = pct + '%';
+            } else {
+                sepPercentText.textContent = '';
+                sepProgressWrap.hidden = true;
+                sepIndeterminate.hidden = false;
+            }
+            sepEtaText.textContent = formatEta(data.eta_sec);
+            sepDeviceRow.innerHTML = '';
+            var runBadge = buildDeviceBadge(data.device);
+            if (runBadge) {
+                sepDeviceRow.appendChild(runBadge);
+                if (data.device === 'cpu') {
+                    var note = document.createElement('span');
+                    note.className = 'muted';
+                    note.textContent = ' GPU kullanılmıyor — ayrıştırma daha yavaş olur.';
+                    sepDeviceRow.appendChild(note);
+                }
+            }
+            showSepPanel('running');
+        } else if (data.status === 'done') {
+            sepMethodLabel.textContent = sepMethodLabelText(data.method);
+            sepAudio.src = data.bg_url || '';
+            sepDoneDeviceBadge.innerHTML = '';
+            var doneBadge = buildDeviceBadge(data.device);
+            if (doneBadge) sepDoneDeviceBadge.appendChild(doneBadge);
+            var cueCount = typeof data.cue_count === 'number' ? data.cue_count : 0;
+            sepCueCountText.textContent = cueCount + ' replik aralığı ayrıştırıldı';
+            showSepPanel('done');
+            stopSepPolling();
+        } else if (data.status === 'stale') {
+            sepStaleAudio.src = data.bg_url || '';
+            showSepPanel('stale');
+            stopSepPolling();
+        } else if (data.status === 'error') {
+            sepErrorMsg.textContent = data.message || 'Ayrıştırma sırasında bir hata oluştu.';
+            showSepPanel('error');
+            stopSepPolling();
+        } else {
+            showSepPanel('none');
+            stopSepPolling();
+        }
+    }
+
+    function fetchSepStatus() {
+        return fetch('/api/video/' + videoId + '/separation')
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                applySepStatus(data);
+                return data;
+            })
+            .catch(function () {
+                stopSepPolling();
+                sepErrorMsg.textContent = 'Durum bilgisi alınamadı (ağ hatası). Sayfayı yenileyip tekrar dene.';
+                showSepPanel('error');
+                return null;
+            });
+    }
+
+    function startSepPolling() {
+        stopSepPolling();
+        sepPollTimer = setInterval(fetchSepStatus, 2000);
+    }
+
+    function startSeparation(btn) {
+        btn.disabled = true;
+        return fetch('/api/video/' + videoId + '/separate', { method: 'POST' })
+            .then(function () {
+                showSepPanel('running');
+                startSepPolling();
+            })
+            .catch(function () {
+                sepErrorMsg.textContent = 'Ayrıştırma başlatılamadı (ağ hatası).';
+                showSepPanel('error');
+            })
+            .finally(function () {
+                btn.disabled = false;
+            });
+    }
+
+    sepStartBtn.addEventListener('click', function () {
+        startSeparation(sepStartBtn);
+    });
+
+    sepRetryBtn.addEventListener('click', function () {
+        sepStartBtn.click();
+    });
+
+    if (sepResepBtn) {
+        sepResepBtn.addEventListener('click', function () {
+            startSeparation(sepResepBtn);
+        });
+    }
+
+    sepDeleteBtn.addEventListener('click', function () {
+        if (!confirm('Ayrıştırma sonucu silinsin mi?')) return;
+        sepDeleteBtn.disabled = true;
+        fetch('/api/video/' + videoId + '/separation/delete', { method: 'POST' })
+            .then(fetchSepStatus)
+            .catch(function () {
+                sepErrorMsg.textContent = 'Silme işlemi başarısız oldu.';
+                showSepPanel('error');
+            })
+            .finally(function () {
+                sepDeleteBtn.disabled = false;
+            });
+    });
+
+    fetchSepStatus().then(function (data) {
+        if (data && data.status === 'running') startSepPolling();
+    });
+
+    // ---- Replikleri Otomatik Oluştur ----
+    var autoRunningBox = document.getElementById('autoRunning');
+    var autoDoneBox = document.getElementById('autoDone');
+    var autoErrorBox = document.getElementById('autoError');
+    var autoErrorMsg = document.getElementById('autoErrorMsg');
+    var autoStartBtn = document.getElementById('autoStartBtn');
+    var autoRetryBtn = document.getElementById('autoRetryBtn');
+    var autoModeSelect = document.getElementById('autoModeSelect');
+    var autoStageText = document.getElementById('autoStageText');
+    var autoPercentText = document.getElementById('autoPercentText');
+    var autoProgressWrap = document.getElementById('autoProgressWrap');
+    var autoProgressFill = document.getElementById('autoProgressFill');
+    var autoIndeterminate = document.getElementById('autoIndeterminate');
+    var autoDeviceRow = document.getElementById('autoDeviceRow');
+    var sourceYoutubeOption = document.getElementById('sourceYoutubeOption');
+    var youtubeUrlInput = document.getElementById('youtubeUrlInput');
+    var autoLangDisplay = document.getElementById('autoLangDisplay');
+    var autoPollTimer = null;
+
+    var autoLangLabels = {
+        auto: 'Otomatik algıla', tr: 'Türkçe', en: 'İngilizce', de: 'Almanca',
+        fr: 'Fransızca', es: 'İspanyolca', ru: 'Rusça', ar: 'Arapça'
+    };
+
+    function updateAutoLangDisplay() {
+        if (!langSelect || !autoLangDisplay) return;
+        autoLangDisplay.textContent = autoLangLabels[langSelect.value] || langSelect.value;
+    }
+    if (langSelect) {
+        langSelect.addEventListener('change', updateAutoLangDisplay);
+        updateAutoLangDisplay();
+    }
+
+    function updateYoutubeOptionState() {
+        if (!sourceYoutubeOption || !youtubeUrlInput) return;
+        var hasUrl = youtubeUrlInput.value.trim().length > 0;
+        sourceYoutubeOption.classList.toggle('disabled', !hasUrl);
+    }
+    if (youtubeUrlInput) {
+        youtubeUrlInput.addEventListener('input', updateYoutubeOptionState);
+        updateYoutubeOptionState();
+    }
+
+    function stopAutoPolling() {
+        if (autoPollTimer) {
+            clearInterval(autoPollTimer);
+            autoPollTimer = null;
+        }
+    }
+
+    function showAutoStatus(name) {
+        autoRunningBox.hidden = name !== 'running';
+        autoDoneBox.hidden = name !== 'done';
+        autoErrorBox.hidden = name !== 'error';
+    }
+
+    function applyAutoStatus(data) {
+        if (!data) return;
+        if (data.status === 'running') {
+            autoStartBtn.disabled = true;
+            autoStageText.textContent = data.stage || 'İşleniyor…';
+            if (typeof data.progress === 'number') {
+                var pct = Math.min(100, Math.max(0, data.progress));
+                autoPercentText.textContent = '%' + Math.round(pct);
+                autoProgressWrap.hidden = false;
+                autoIndeterminate.hidden = true;
+                autoProgressFill.style.width = pct + '%';
+            } else {
+                autoPercentText.textContent = '';
+                autoProgressWrap.hidden = true;
+                autoIndeterminate.hidden = false;
+            }
+            autoDeviceRow.innerHTML = '';
+            var runBadge = buildDeviceBadge(data.device);
+            if (runBadge) autoDeviceRow.appendChild(runBadge);
+            showAutoStatus('running');
+        } else if (data.status === 'done') {
+            autoStartBtn.disabled = false;
+            var added = typeof data.added === 'number' ? data.added : 0;
+            autoDoneBox.textContent = added + ' replik oluşturuldu.';
+            showAutoStatus('done');
+            stopAutoPolling();
+            loadCues().then(function (cues) { renderCues(cues); }).catch(function () {});
+        } else if (data.status === 'error') {
+            autoStartBtn.disabled = false;
+            autoErrorMsg.textContent = data.message || 'Replik üretimi sırasında bir hata oluştu.';
+            showAutoStatus('error');
+            stopAutoPolling();
+        } else {
+            autoStartBtn.disabled = false;
+            showAutoStatus('none');
+            stopAutoPolling();
+        }
+    }
+
+    function fetchAutoStatus() {
+        return fetch('/api/video/' + videoId + '/cues/auto/status')
+            .then(function (res) {
+                if (!res.ok) throw new Error('http ' + res.status);
+                return res.json();
+            })
+            .then(function (data) {
+                applyAutoStatus(data);
+                return data;
+            })
+            .catch(function () {
+                stopAutoPolling();
+                autoStartBtn.disabled = false;
+                autoErrorMsg.textContent = 'Durum bilgisi alınamadı (ağ hatası ya da özellik henüz etkin değil).';
+                showAutoStatus('error');
+                return null;
+            });
+    }
+
+    function startAutoPolling() {
+        stopAutoPolling();
+        autoPollTimer = setInterval(fetchAutoStatus, 2000);
+    }
+
+    function startAutoCueGeneration() {
+        clearError();
+        var sourceInput = document.querySelector('input[name="autoSource"]:checked');
+        var source = sourceInput ? sourceInput.value : 'whisper';
+        var mode = autoModeSelect.value;
+        var lang = langSelect ? langSelect.value : 'auto';
+        var url = youtubeUrlInput ? youtubeUrlInput.value.trim() : '';
+
+        if (source === 'youtube' && !url) {
+            showError('YouTube bağlantısı gir.');
+            return;
+        }
+        if (mode === 'replace') {
+            if (!confirm('Bu videodaki TÜM replikler silinip yenileriyle değiştirilecek. Emin misin?')) return;
+        }
+
+        var fd = new FormData();
+        fd.append('source', source);
+        fd.append('mode', mode);
+        fd.append('language', lang);
+        if (source === 'youtube') fd.append('url', url);
+
+        autoStartBtn.disabled = true;
+        autoStageText.textContent = 'Başlatılıyor…';
+        autoPercentText.textContent = '';
+        autoProgressWrap.hidden = true;
+        autoIndeterminate.hidden = false;
+        autoDeviceRow.innerHTML = '';
+        showAutoStatus('running');
+
+        fetch('/api/video/' + videoId + '/cues/auto', { method: 'POST', body: fd })
+            .then(function (res) {
+                if (!res.ok) throw new Error('http ' + res.status);
+                return res.json();
+            })
+            .then(function () {
+                startAutoPolling();
+            })
+            .catch(function () {
+                autoStartBtn.disabled = false;
+                autoErrorMsg.textContent = 'İşlem başlatılamadı (ağ hatası ya da özellik henüz etkin değil).';
+                showAutoStatus('error');
+            });
+    }
+
+    autoStartBtn.addEventListener('click', startAutoCueGeneration);
+    autoRetryBtn.addEventListener('click', startAutoCueGeneration);
+
+    window.addEventListener('beforeunload', function () {
+        stopSepPolling();
+        stopAutoPolling();
+    });
+
+    // ---- Replikleri Paylaş: içe aktarma ----
+    var importForm = document.getElementById('importForm');
+    var importModeSelect = document.getElementById('importMode');
+    var importSubmitBtn = document.getElementById('importSubmitBtn');
+
+    if (importForm) {
+        importForm.addEventListener('submit', function (e) {
+            e.preventDefault();
+
+            if (importModeSelect.value === 'replace') {
+                if (!confirm('Bu videodaki TÜM replikler silinip dosyadakilerle değiştirilecek. Emin misin?')) {
+                    return;
+                }
+            }
+
+            clearError();
+            importSubmitBtn.disabled = true;
+            var originalLabel = importSubmitBtn.textContent;
+            importSubmitBtn.textContent = 'Yükleniyor…';
+
+            var fd = new FormData(importForm);
+            fetch(importForm.action, { method: 'POST', body: fd })
+                .then(function (res) {
+                    var errMsg = parseErrorFromUrl(res.url);
+                    if (errMsg) {
+                        showError(errMsg);
+                        return null;
+                    }
+                    var okMsg = parseOkFromUrl(res.url);
+                    if (okMsg) showOk(okMsg);
+                    return loadCues();
+                })
+                .then(function (cues) {
+                    if (!cues) return;
+                    renderCues(cues);
+                    importForm.reset();
+                })
+                .catch(function () {
+                    showError('İçe aktarma sırasında bir hata oluştu (ağ hatası).');
+                })
+                .finally(function () {
+                    importSubmitBtn.disabled = false;
+                    importSubmitBtn.textContent = originalLabel;
+                });
+        });
+    }
+})();
+</script>
+{% endblock %}

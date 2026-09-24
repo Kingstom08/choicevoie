@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}{{ take.name }} - {{ video.title }}{% endblock %}
+{% block content %}
+{% if take.status == 'rendering' %}
+<meta http-equiv="refresh" content="5">
+{% endif %}
+<h1>{{ take.name }}</h1>
+{% set active = 'takes' %}
+{% include "_tabs.html" %}
+<p><a href="/takes/{{ video.id }}" class="btn">Öncekiler listesi</a></p>
+
+{% if take.status == 'done' %}
+<section class="card">
+    <video controls src="/output/{{ take.output_file }}"></video>
+    <div class="actions" style="margin-top:10px">
+        <a href="/output/{{ take.output_file }}" download class="btn btn-primary">İndir</a>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Replikler</h2>
+    {% if cues %}
+    <table class="cue-table">
+        <thead>
+            <tr><th>Zaman</th><th>Metin</th></tr>
+        </thead>
+        <tbody>
+            {% for c in cues %}
+            <tr>
+                <td>{{ "%.1f"|format(c.start_sec) }}–{{ "%.1f"|format(c.end_sec) }} sn</td>
+                <td>{{ c.text }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Replik bulunamadı.</p>
+    {% endif %}
+</section>
+
+{% elif take.status == 'error' %}
+<div class="alert">{{ take.error }}</div>
+
+{% elif take.status == 'rendering' %}
+<section class="card">
+    <p>Montajlanıyor... Sayfa birkaç saniyede bir otomatik yenilenecek.</p>
+</section>
+
+{% else %}
+<section class="card">
+    <p class="muted">Bu dublaj henüz kaydedilmemiş. <a href="/dub/{{ video.id }}?take={{ take.id }}">Devam et</a></p>
+</section>
+{% endif %}
+{% endblock %}

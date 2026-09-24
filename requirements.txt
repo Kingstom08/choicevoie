@@ -1,0 +1,27 @@
+# Choos Voie - platformdan bagimsiz cekirdek bagimliliklar.
+# Her platformda ONCE bu kurulur:
+#     pip install -r requirements.txt
+# Ardindan donanimina gore ek dosyayi kur:
+#     NVIDIA GPU (Windows/Linux) -> pip install -r requirements-cuda.txt
+#     Apple Silicon (macOS)      -> pip install -r requirements-mac.txt
+#     Sadece CPU                 -> ek adim yok
+
+# --- Web sunucusu ---
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+pydantic
+
+# --- Video indirme / ffmpeg ---
+yt-dlp
+imageio-ffmpeg
+truststore
+
+# --- Konusma tanima (transkripsiyon, otomatik replik) ---
+faster-whisper
+
+# --- Konusma / arka plan ses ayrimi ---
+# demucs, PyTorch'u kendisi ceker; platforma uygun surum gelir.
+demucs
+numpy

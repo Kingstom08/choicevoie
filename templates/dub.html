@@ -1,0 +1,1125 @@
+{% extends "base.html" %}
+{% block title %}Dublaj - {{ video.title }}{% endblock %}
+{% block content %}
+<h1>Dublaj: {{ video.title }}</h1>
+{% set active = 'dub' %}
+{% include "_tabs.html" %}
+<p><a href="/" class="btn">Video listesi</a></p>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+
+{% if not cues %}
+<section class="card">
+    <p class="muted">Bu videoda henüz replik yok. <a href="/admin/{{ video.id }}">Admin panelden replik ekle</a>.</p>
+</section>
+{% else %}
+<div class="toolbar card">
+    <button type="button" id="previewAllBtn" class="btn btn-primary">▶ Baştan Sona Önizle</button>
+    <label class="muted"><input type="checkbox" id="autoNextToggle" checked> Otomatik sonraki replik</label>
+    <label class="muted"><input type="checkbox" id="prerollToggle" checked> Hazırlık payı (1.5 sn)</label>
+    <button type="button" id="shortcutsToggle" class="btn">⌨ Kısayollar</button>
+</div>
+<div class="shortcut-help" id="shortcutsHelp" style="display:none">
+    <strong>Klavye kısayolları</strong>
+    <ul>
+        <li><kbd>Boşluk</kbd> — Seçili repliği kaydet / kaydı durdur</li>
+        <li><kbd>L</kbd> — Sahneyi dinle</li>
+        <li><kbd>P</kbd> — Dublajlı dinle</li>
+        <li><kbd>↑</kbd> / <kbd>↓</kbd> — Önceki / sonraki replik</li>
+        <li><kbd>Esc</kbd> — Çalan/kaydeden her şeyi durdur</li>
+    </ul>
+    <span class="muted">Bir metin kutusuna odaklanıldığında kısayollar çalışmaz.</span>
+</div>
+
+<div class="dub-layout">
+    <div class="dub-video-col">
+        <div class="card">
+            <video id="dubVideo" controls>
+                <source src="/media/{{ video.filename }}">
+            </video>
+            <div class="actions" style="margin-top:10px">
+                <button type="button" id="muteToggle" class="btn">Kayıt sırasında video sesi: Kapalı</button>
+                <span class="muted" id="muteHint">Kapalıyken mikrofon orijinal sesi kapmaz. Açarsan kulaklık kullan.</span>
+            </div>
+
+            <div id="subtitleBox" class="subtitle-box subtitle-box-lg">Bir replik seçip "Kaydet" düğmesine bas.</div>
+
+            <div class="panel-title">Videonun sesi (zaman çizelgesi)</div>
+            <div class="wave-timeline" id="videoWaveWrap">
+                <div class="wave-status" id="waveStatus">Ses dalgası yükleniyor…</div>
+                <canvas id="videoWave"></canvas>
+                <div class="cue-regions" id="cueRegions"></div>
+                <div class="wave-playhead" id="wavePlayhead"></div>
+            </div>
+            <div class="wave-labels" id="waveLabels"></div>
+            <p class="muted" id="selectionInfo">Bir replik seçmek için zaman çizelgesine, replik bölgesine ya da listeye tıkla.</p>
+
+            <div class="panel-title">Mikrofonun sesi (anlık)</div>
+            <div class="wave-box" id="waveBox" style="display:none">
+                <canvas id="wave" width="600" height="120"></canvas>
+                <div class="rec-badge" id="recBadge" style="display:none">● KAYIT <span id="recCountdown"></span></div>
+                <div class="countdown" id="countdownBox" style="display:none"></div>
+            </div>
+            <div class="level-bar"><div class="level-fill" id="levelFill"></div></div>
+            <p class="muted" id="micStatus">Mikrofon izni bekleniyor...</p>
+
+            <div class="actions" style="margin-top:8px">
+                <label class="muted" style="display:flex;flex-direction:column;gap:4px">Mikrofon cihazı
+                    <select id="micDeviceSelect" class="device-select"></select>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <div class="dub-list-col">
+        <div class="card">
+            <h2>Replikler</h2>
+            <p class="progress-text" id="progressText">0 / {{ cues|length }} replik kaydedildi</p>
+            <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+            <table class="cue-table">
+                <thead>
+                    <tr><th>#</th><th>Zaman</th><th>Metin</th><th>Durum</th><th>İşlemler</th></tr>
+                </thead>
+                <tbody id="cueListBody">
+                    {% for c in cues %}
+                    <tr class="cue-row" data-cue-id="{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}" data-text="{{ c.text|e }}">
+                        <td>{{ loop.index }}</td>
+                        <td>{{ "%.1f"|format(c.start_sec) }}–{{ "%.1f"|format(c.end_sec) }} sn</td>
+                        <td>{{ c.text }}</td>
+                        <td>
+                            <span class="status-dot status-empty" id="status-{{ c.id }}">○ Boş</span>
+                            <span class="warn-badge" id="warn-{{ c.id }}" style="display:none"></span>
+                        </td>
+                        <td class="actions">
+                            <button type="button" class="btn btn-listen-scene" data-cue-id="{{ c.id }}" title="Sahneyi dinle (L)">🔊 Sahneyi Dinle</button>
+                            <button type="button" class="btn btn-primary btn-rec" data-cue-id="{{ c.id }}">🎙 Kaydet</button>
+                            <button type="button" class="btn btn-stop-rec" data-cue-id="{{ c.id }}" style="display:none">⏹ Durdur</button>
+                            <button type="button" class="btn btn-listen-dub" data-cue-id="{{ c.id }}" disabled title="Dublajlı dinle (P)">▶ Dublajlı Dinle</button>
+                            <span id="listen-{{ c.id }}"></span>
+                            <button type="button" class="btn btn-danger btn-del-rec" data-cue-id="{{ c.id }}" style="display:none">🗑 Sil</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>Dublajı Kaydet</h2>
+            <form id="saveForm" action="/take/{{ take.id if take else 0 }}/save" method="post" class="form">
+                <label>İsim
+                    <input type="text" name="name" id="takeName" required>
+                </label>
+                <div class="checkbox-row" id="keepBgRow">
+                    <label>
+                        <input type="checkbox" name="keep_background" id="keepBgCheckbox" value="1" disabled>
+                        Replik aralığında arka plan sesini koru (müzik/efekt sussun istemiyorum)
+                    </label>
+                    <p class="muted" id="keepBgHint">Önce Admin panelden sesi ayrıştırman gerekiyor. <a href="/admin/{{ video.id }}">Admin panele git</a></p>
+                </div>
+                <button type="submit" id="saveBtn" disabled>Dublajı Kaydet</button>
+            </form>
+            <p class="muted" id="saveHint">Önce en az bir replik kaydet.</p>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+(function () {
+    if (!document.getElementById('dubVideo')) return;
+
+    const videoId = {{ video.id }};
+    let takeId = {{ take.id if take else 'null' }};
+
+    const videoEl = document.getElementById('dubVideo');
+    const muteToggle = document.getElementById('muteToggle');
+    const subtitleBox = document.getElementById('subtitleBox');
+    const waveBox = document.getElementById('waveBox');
+    const canvas = document.getElementById('wave');
+    const canvasCtx = canvas.getContext('2d');
+    const recBadge = document.getElementById('recBadge');
+    const recCountdown = document.getElementById('recCountdown');
+    const countdownBox = document.getElementById('countdownBox');
+    const levelFill = document.getElementById('levelFill');
+    const micStatus = document.getElementById('micStatus');
+    const micDeviceSelect = document.getElementById('micDeviceSelect');
+    const progressText = document.getElementById('progressText');
+    const progressFill = document.getElementById('progressFill');
+    const saveForm = document.getElementById('saveForm');
+    const saveBtn = document.getElementById('saveBtn');
+    const saveHint = document.getElementById('saveHint');
+
+    const previewAllBtn = document.getElementById('previewAllBtn');
+    const autoNextToggle = document.getElementById('autoNextToggle');
+    const prerollToggle = document.getElementById('prerollToggle');
+    const shortcutsToggle = document.getElementById('shortcutsToggle');
+    const shortcutsHelp = document.getElementById('shortcutsHelp');
+
+    const videoWaveWrap = document.getElementById('videoWaveWrap');
+    const videoWaveCanvas = document.getElementById('videoWave');
+    const videoWaveCtx = videoWaveCanvas.getContext('2d');
+    const waveStatusEl = document.getElementById('waveStatus');
+    const cueRegionsEl = document.getElementById('cueRegions');
+    const wavePlayhead = document.getElementById('wavePlayhead');
+    const waveLabelsEl = document.getElementById('waveLabels');
+    const selectionInfo = document.getElementById('selectionInfo');
+
+    const cueRows = Array.from(document.querySelectorAll('.cue-row'));
+    const recordings = {};
+
+    function cueById(cueId) {
+        return cueRows.find(function (r) { return r.dataset.cueId === String(cueId); });
+    }
+
+    async function hydrateRecordings() {
+        if (!takeId) return;
+        try {
+            const res = await fetch(`/api/take/${takeId}`);
+            const data = await res.json();
+            if (data && data.recordings) {
+                Object.keys(data.recordings).forEach(function (cueId) {
+                    recordings[cueId] = data.recordings[cueId];
+                });
+            }
+        } catch (err) {}
+        cueRows.forEach(function (row) { renderRowStatus(row.dataset.cueId); });
+        updateProgress();
+    }
+
+    // ---- video mute toggle (kayıt sırasında video sesi) ----
+    let recordMuteDefault = true; // varsayılan: kayıt sırasında video sesi kapalı
+    function updateMuteToggleLabel() {
+        muteToggle.textContent = 'Kayıt sırasında video sesi: ' + (recordMuteDefault ? 'Kapalı' : 'Açık');
+    }
+    muteToggle.addEventListener('click', function () {
+        recordMuteDefault = !recordMuteDefault;
+        updateMuteToggleLabel();
+    });
+    updateMuteToggleLabel();
+    videoEl.muted = recordMuteDefault;
+
+    // ---- mikrofon anlık dalga formu ----
+    let audioCtx = null;
+    let analyser = null;
+    let mediaStream = null;
+    let sourceNode = null;
+    let drawing = false;
+
+    function resizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+    }
+
+    function drawWave() {
+        if (!drawing || !analyser) return;
+        requestAnimationFrame(drawWave);
+
+        const bufferLength = analyser.fftSize;
+        const dataArray = new Uint8Array(bufferLength);
+        analyser.getByteTimeDomainData(dataArray);
+
+        canvasCtx.fillStyle = '#0e1014';
+        canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+        canvasCtx.lineWidth = 2;
+        canvasCtx.strokeStyle = waveBox.classList.contains('recording') ? '#e0574f' : '#4f8cff';
+        canvasCtx.beginPath();
+
+        const sliceWidth = canvas.width / bufferLength;
+        let x = 0;
+        let sumSquares = 0;
+        for (let i = 0; i < bufferLength; i++) {
+            const v = dataArray[i] / 128.0;
+            const y = (v * canvas.height) / 2;
+            if (i === 0) {
+                canvasCtx.moveTo(x, y);
+            } else {
+                canvasCtx.lineTo(x, y);
+            }
+            const centered = v - 1.0;
+            sumSquares += centered * centered;
+            x += sliceWidth;
+        }
+        canvasCtx.lineTo(canvas.width, canvas.height / 2);
+        canvasCtx.stroke();
+
+        const rms = Math.sqrt(sumSquares / bufferLength);
+        const level = Math.min(100, Math.round(rms * 300));
+        levelFill.style.width = level + '%';
+        levelFill.classList.remove('level-quiet', 'level-ok', 'level-hot');
+        if (level < 8) {
+            levelFill.classList.add('level-quiet');
+        } else if (level > 75) {
+            levelFill.classList.add('level-hot');
+        } else {
+            levelFill.classList.add('level-ok');
+        }
+    }
+
+    async function refreshDeviceList() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices || !micDeviceSelect) return;
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const mics = devices.filter(function (d) { return d.kind === 'audioinput'; });
+            const current = micDeviceSelect.value;
+            micDeviceSelect.innerHTML = '';
+            mics.forEach(function (d, i) {
+                const opt = document.createElement('option');
+                opt.value = d.deviceId;
+                opt.textContent = d.label || ('Mikrofon ' + (i + 1));
+                micDeviceSelect.appendChild(opt);
+            });
+            if (current) micDeviceSelect.value = current;
+        } catch (err) {}
+    }
+
+    async function initMic(deviceId) {
+        if (mediaStream) {
+            mediaStream.getTracks().forEach(function (t) { t.stop(); });
+            mediaStream = null;
+        }
+        try {
+            const constraints = deviceId ? { audio: { deviceId: { exact: deviceId } } } : { audio: true };
+            mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+            micStatus.textContent = 'Mikrofon izni reddedildi ya da kullanılamıyor. Tarayıcı ayarlarından mikrofon iznini kontrol et.';
+            return;
+        }
+        micStatus.textContent = 'Mikrofon hazır.';
+        waveBox.style.display = '';
+        if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} }
+        if (!audioCtx) {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (!analyser) {
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 2048;
+        }
+        sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+        sourceNode.connect(analyser);
+        resizeCanvas();
+        if (!drawing) {
+            drawing = true;
+            drawWave();
+        }
+        refreshDeviceList();
+    }
+
+    if (micDeviceSelect) {
+        micDeviceSelect.addEventListener('change', function () {
+            initMic(micDeviceSelect.value);
+        });
+    }
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', refreshDeviceList);
+    }
+
+    // ---- videonun zaman eksenli ses şeridi ----
+    let waveformData = null;
+    let waveDPR = window.devicePixelRatio || 1;
+    let selectedCueId = null;
+
+    function resizeVideoWave() {
+        const rect = videoWaveCanvas.getBoundingClientRect();
+        waveDPR = window.devicePixelRatio || 1;
+        videoWaveCanvas.width = Math.max(1, Math.round(rect.width * waveDPR));
+        videoWaveCanvas.height = Math.max(1, Math.round(rect.height * waveDPR));
+        drawPeaks();
+    }
+
+    function drawPeaks() {
+        const w = videoWaveCanvas.width;
+        const h = videoWaveCanvas.height;
+        videoWaveCtx.clearRect(0, 0, w, h);
+        videoWaveCtx.fillStyle = '#0e1014';
+        videoWaveCtx.fillRect(0, 0, w, h);
+        if (!waveformData || waveformData.no_audio || !waveformData.peaks || !waveformData.peaks.length) return;
+        const peaks = waveformData.peaks;
+        const mid = h / 2;
+        videoWaveCtx.fillStyle = '#4f8cff';
+        const barW = w / peaks.length;
+        for (let i = 0; i < peaks.length; i++) {
+            const v = peaks[i];
+            const barH = Math.max(1 * waveDPR, v * (h * 0.92));
+            const x = i * barW;
+            videoWaveCtx.fillRect(x, mid - barH / 2, Math.max(1, barW - 0.4), barH);
+        }
+    }
+
+    function formatTime(sec) {
+        sec = Math.max(0, Math.round(sec));
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return m + ':' + String(s).padStart(2, '0');
+    }
+
+    function buildWaveLabels() {
+        waveLabelsEl.innerHTML = '';
+        if (!waveformData || waveformData.no_audio || !waveformData.duration) return;
+        const duration = waveformData.duration;
+        let step = 60;
+        if (duration <= 60) step = 10;
+        else if (duration <= 180) step = 20;
+        else if (duration <= 600) step = 30;
+        for (let t = 0; t <= duration; t += step) {
+            const span = document.createElement('span');
+            span.textContent = formatTime(t);
+            span.style.left = ((t / duration) * 100) + '%';
+            waveLabelsEl.appendChild(span);
+        }
+    }
+
+    function buildCueRegions() {
+        cueRegionsEl.innerHTML = '';
+        if (!waveformData || waveformData.no_audio || !waveformData.duration) return;
+        const duration = waveformData.duration;
+        cueRows.forEach(function (row) {
+            const start = parseFloat(row.dataset.start);
+            const end = parseFloat(row.dataset.end);
+            const cueId = row.dataset.cueId;
+            const num = row.children[0].textContent.trim();
+            const div = document.createElement('div');
+            div.className = 'cue-region' + (recordings[cueId] ? ' filled' : '');
+            div.style.left = ((start / duration) * 100) + '%';
+            div.style.width = (Math.max(0, (end - start) / duration) * 100) + '%';
+            div.dataset.cueId = cueId;
+            div.setAttribute('role', 'button');
+            div.setAttribute('tabindex', '0');
+            div.title = formatTime(start) + '–' + formatTime(end) + ': ' + row.dataset.text;
+            div.setAttribute('aria-label', 'Replik ' + num + ': ' + row.dataset.text);
+            const label = document.createElement('span');
+            label.textContent = num;
+            div.appendChild(label);
+            div.addEventListener('click', function (e) {
+                e.stopPropagation();
+                videoEl.currentTime = start;
+                updatePlayheadPosition();
+                selectCue(cueId);
+            });
+            div.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    videoEl.currentTime = start;
+                    updatePlayheadPosition();
+                    selectCue(cueId);
+                }
+            });
+            cueRegionsEl.appendChild(div);
+        });
+        updateCueRegionActive();
+    }
+
+    function updateCueRegionActive() {
+        Array.from(cueRegionsEl.children).forEach(function (div) {
+            div.classList.toggle('active', div.dataset.cueId === String(selectedCueId));
+        });
+    }
+
+    function selectCue(cueId) {
+        selectedCueId = cueId;
+        cueRows.forEach(function (r) {
+            r.classList.toggle('cue-row-active', r.dataset.cueId === String(cueId));
+        });
+        updateCueRegionActive();
+        const row = cueById(cueId);
+        if (row) {
+            const num = row.children[0].textContent.trim();
+            const dur = (parseFloat(row.dataset.end) - parseFloat(row.dataset.start)).toFixed(1);
+            selectionInfo.textContent = 'Seçili replik: #' + num + ' · Süre: ' + dur + ' sn — "' + row.dataset.text + '"';
+        }
+    }
+
+    function updatePlayheadPosition() {
+        if (!waveformData || !waveformData.duration) return;
+        const pct = Math.min(1, Math.max(0, videoEl.currentTime / waveformData.duration));
+        wavePlayhead.style.left = (pct * 100) + '%';
+    }
+
+    let waveRAF = null;
+    function waveLoop() {
+        updatePlayheadPosition();
+        if (!videoEl.paused && !videoEl.ended) {
+            waveRAF = requestAnimationFrame(waveLoop);
+        } else {
+            waveRAF = null;
+        }
+    }
+    function ensureWaveLoop() {
+        if (waveRAF == null) waveRAF = requestAnimationFrame(waveLoop);
+    }
+    videoEl.addEventListener('play', ensureWaveLoop);
+    videoEl.addEventListener('seeked', updatePlayheadPosition);
+    videoEl.addEventListener('pause', updatePlayheadPosition);
+    videoEl.addEventListener('loadedmetadata', updatePlayheadPosition);
+
+    videoWaveWrap.addEventListener('click', function (e) {
+        if (!waveformData || waveformData.no_audio || !waveformData.duration) return;
+        if (e.target.closest('.cue-region')) return;
+        const rect = videoWaveWrap.getBoundingClientRect();
+        const ratio = (e.clientX - rect.left) / rect.width;
+        videoEl.currentTime = Math.min(waveformData.duration, Math.max(0, ratio * waveformData.duration));
+        updatePlayheadPosition();
+    });
+
+    async function loadWaveform() {
+        try {
+            const res = await fetch(`/api/video/${videoId}/waveform`);
+            waveformData = await res.json();
+        } catch (err) {
+            waveformData = { duration: 0, peaks: [], count: 0, no_audio: true };
+        }
+        if (!waveformData || waveformData.no_audio) {
+            waveStatusEl.textContent = 'Bu videoda ses kanalı yok.';
+            waveStatusEl.style.display = '';
+        } else {
+            waveStatusEl.style.display = 'none';
+        }
+        resizeVideoWave();
+        buildWaveLabels();
+        buildCueRegions();
+        updatePlayheadPosition();
+    }
+
+    window.addEventListener('resize', function () {
+        resizeCanvas();
+        resizeVideoWave();
+    });
+
+    // ---- take management ----
+    async function ensureTake() {
+        if (takeId) return takeId;
+        const res = await fetch(`/dub/${videoId}/take`, { method: 'POST' });
+        const data = await res.json();
+        takeId = data.take_id;
+        saveForm.action = `/take/${takeId}/save`;
+        return takeId;
+    }
+
+    function updateProgress() {
+        const total = cueRows.length;
+        const done = Object.keys(recordings).filter(function (k) { return recordings[k]; }).length;
+        progressText.textContent = done + ' / ' + total + ' replik kaydedildi';
+        const pct = total ? Math.round((done / total) * 100) : 0;
+        if (progressFill) progressFill.style.width = pct + '%';
+        if (done > 0) {
+            saveBtn.disabled = false;
+            saveHint.style.display = 'none';
+        } else {
+            saveBtn.disabled = true;
+            saveHint.style.display = '';
+        }
+    }
+
+    function checkDurationWarning(cueId, actualDuration) {
+        const row = cueById(cueId);
+        const warnEl = document.getElementById('warn-' + cueId);
+        if (!row || !warnEl || !isFinite(actualDuration)) return;
+        const expected = parseFloat(row.dataset.end) - parseFloat(row.dataset.start);
+        if (!expected) return;
+        const diff = actualDuration - expected;
+        const ratio = Math.abs(diff) / expected;
+        if (ratio > 0.2) {
+            warnEl.textContent = diff < 0 ? (Math.abs(diff).toFixed(1) + ' sn kısa') : (diff.toFixed(1) + ' sn uzun');
+            warnEl.style.display = '';
+        } else {
+            warnEl.textContent = '';
+            warnEl.style.display = 'none';
+        }
+    }
+
+    function renderRowStatus(cueId) {
+        const statusEl = document.getElementById('status-' + cueId);
+        const listenEl = document.getElementById('listen-' + cueId);
+        const warnEl = document.getElementById('warn-' + cueId);
+        const delBtn = document.querySelector('.btn-del-rec[data-cue-id="' + cueId + '"]');
+        const dubBtn = document.querySelector('.btn-listen-dub[data-cue-id="' + cueId + '"]');
+        const url = recordings[cueId];
+        if (url) {
+            statusEl.textContent = '● Kayıtlı';
+            statusEl.className = 'status-dot status-filled';
+            listenEl.innerHTML = '<audio controls src="' + url + '" id="audio-' + cueId + '"></audio>';
+            delBtn.style.display = '';
+            if (dubBtn) dubBtn.disabled = false;
+            const audioTag = document.getElementById('audio-' + cueId);
+            if (audioTag) {
+                audioTag.addEventListener('loadedmetadata', function () {
+                    checkDurationWarning(cueId, audioTag.duration);
+                });
+            }
+        } else {
+            statusEl.textContent = '○ Boş';
+            statusEl.className = 'status-dot status-empty';
+            listenEl.innerHTML = '';
+            delBtn.style.display = 'none';
+            if (dubBtn) dubBtn.disabled = true;
+            if (warnEl) { warnEl.style.display = 'none'; warnEl.textContent = ''; }
+        }
+        buildCueRegions();
+    }
+
+    cueRows.forEach(function (row) {
+        renderRowStatus(row.dataset.cueId);
+    });
+    updateProgress();
+    if (cueRows.length) selectCue(cueRows[0].dataset.cueId);
+
+    // ---- merkezi aktif işlem durumu ----
+    // Aynı anda yalnızca BİR işlem çalışır: 'record' | 'sceneListen' | 'dubListen' | 'preview' | null.
+    // timeupdate için TEK dinleyici burada kurulur; hangi işlem aktifse onun
+    // mantığı tuHandler'a atanır (her işlem için ayrı addEventListener YOK).
+    let activeOp = null;
+    let tuHandler = null;
+    let activeTimers = [];
+    let recordCancelled = false;
+
+    videoEl.addEventListener('timeupdate', function () {
+        if (tuHandler) tuHandler();
+    });
+
+    function trackTimer(id) {
+        activeTimers.push(id);
+        return id;
+    }
+    function clearActiveTimers() {
+        activeTimers.forEach(function (id) { clearTimeout(id); });
+        activeTimers = [];
+    }
+    function scheduleTimer(fn, ms) {
+        const id = setTimeout(function () {
+            activeTimers = activeTimers.filter(function (x) { return x !== id; });
+            fn();
+        }, ms);
+        return trackTimer(id);
+    }
+    function sleep(ms) {
+        return new Promise(function (resolve) { scheduleTimer(resolve, ms); });
+    }
+
+    // herhangi bir işlemi (kayıt dahil) merkezi biçimde durdurur; yeni bir işlem
+    // başlamadan önce çağrılır ki öncekinin dinleyicileri/zamanlayıcıları temizlensin
+    function stopCurrentOp() {
+        clearActiveTimers();
+        if (activeOp === 'sceneListen') stopSceneListen();
+        else if (activeOp === 'dubListen') stopDubListen();
+        else if (activeOp === 'preview') stopPreviewAll();
+        else if (activeOp === 'record') stopRecording();
+    }
+
+    // ---- sahneyi dinle (orijinal ses, kayıt yok) ----
+    let sceneListenState = null;
+    function stopSceneListen() {
+        if (activeOp !== 'sceneListen' || !sceneListenState) { sceneListenState = null; return; }
+        tuHandler = null;
+        videoEl.pause();
+        videoEl.muted = recordMuteDefault;
+        const btn = document.querySelector('.btn-listen-scene[data-cue-id="' + sceneListenState.cueId + '"]');
+        if (btn) { btn.textContent = '🔊 Sahneyi Dinle'; btn.classList.remove('btn-primary'); }
+        sceneListenState = null;
+        activeOp = null;
+    }
+
+    function listenScene(cueId) {
+        if (activeOp === 'record') return;
+        const row = cueById(cueId);
+        if (!row) return;
+        if (activeOp === 'sceneListen' && sceneListenState && sceneListenState.cueId === cueId) { stopSceneListen(); return; }
+        stopCurrentOp();
+        activeOp = 'sceneListen';
+        const start = parseFloat(row.dataset.start);
+        const end = parseFloat(row.dataset.end);
+        videoEl.muted = false;
+        videoEl.volume = 1;
+        videoEl.currentTime = start;
+        selectCue(cueId);
+        const btn = document.querySelector('.btn-listen-scene[data-cue-id="' + cueId + '"]');
+        if (btn) { btn.textContent = '⏹ Durdur'; btn.classList.add('btn-primary'); }
+        sceneListenState = { cueId: cueId };
+        tuHandler = function () {
+            if (videoEl.currentTime >= end) stopSceneListen();
+        };
+        videoEl.play().catch(function () {});
+    }
+
+    // ---- dublajlı dinle (video sessiz + kayıt senkron) ----
+    let dubListenState = null;
+    function stopDubListen() {
+        if (activeOp !== 'dubListen' || !dubListenState) { dubListenState = null; return; }
+        tuHandler = null;
+        videoEl.pause();
+        dubListenState.audioEl.pause();
+        videoEl.muted = recordMuteDefault;
+        const btn = document.querySelector('.btn-listen-dub[data-cue-id="' + dubListenState.cueId + '"]');
+        if (btn) { btn.textContent = '▶ Dublajlı Dinle'; btn.classList.remove('btn-primary'); }
+        dubListenState = null;
+        activeOp = null;
+    }
+
+    function listenDub(cueId) {
+        if (activeOp === 'record') return;
+        const url = recordings[cueId];
+        if (!url) return;
+        if (activeOp === 'dubListen' && dubListenState && dubListenState.cueId === cueId) { stopDubListen(); return; }
+        const row = cueById(cueId);
+        if (!row) return;
+        stopCurrentOp();
+        activeOp = 'dubListen';
+        const start = parseFloat(row.dataset.start);
+        const end = parseFloat(row.dataset.end);
+        selectCue(cueId);
+        const audioEl = new Audio(url);
+        videoEl.muted = true;
+        videoEl.currentTime = start;
+        const btn = document.querySelector('.btn-listen-dub[data-cue-id="' + cueId + '"]');
+        if (btn) { btn.textContent = '⏹ Durdur'; btn.classList.add('btn-primary'); }
+        dubListenState = { cueId: cueId, audioEl: audioEl };
+        tuHandler = function () {
+            if (videoEl.currentTime >= end) stopDubListen();
+        };
+        videoEl.play().catch(function () {});
+        audioEl.currentTime = 0;
+        audioEl.play().catch(function () {});
+    }
+
+    // ---- baştan sona önizle ----
+    let previewState = null;
+    function previewTimeUpdateHandler() {
+        const t = videoEl.currentTime;
+        const row = cueRows.find(function (r) {
+            return t >= parseFloat(r.dataset.start) && t < parseFloat(r.dataset.end);
+        });
+        const cueId = row ? row.dataset.cueId : null;
+        const url = cueId ? recordings[cueId] : null;
+        if (url) {
+            videoEl.muted = true;
+            if (!previewState || previewState.cueId !== cueId) {
+                if (previewState) previewState.audioEl.pause();
+                const audioEl = new Audio(url);
+                audioEl.currentTime = Math.max(0, t - parseFloat(row.dataset.start));
+                audioEl.play().catch(function () {});
+                previewState = { cueId: cueId, audioEl: audioEl };
+                selectCue(cueId);
+            }
+        } else {
+            videoEl.muted = false;
+            if (previewState) {
+                previewState.audioEl.pause();
+                previewState = null;
+            }
+        }
+    }
+
+    function stopPreviewAll() {
+        if (activeOp !== 'preview') return;
+        tuHandler = null;
+        videoEl.removeEventListener('ended', stopPreviewAll);
+        if (previewState && previewState.audioEl) previewState.audioEl.pause();
+        previewState = null;
+        videoEl.pause();
+        videoEl.muted = recordMuteDefault;
+        previewAllBtn.textContent = '▶ Baştan Sona Önizle';
+        previewAllBtn.classList.remove('btn-primary');
+        activeOp = null;
+    }
+
+    previewAllBtn.addEventListener('click', function () {
+        if (activeOp === 'preview') { stopPreviewAll(); return; }
+        if (activeOp === 'record') return;
+        stopCurrentOp();
+        activeOp = 'preview';
+        videoEl.currentTime = 0;
+        tuHandler = previewTimeUpdateHandler;
+        videoEl.addEventListener('ended', stopPreviewAll);
+        previewAllBtn.textContent = '⏹ Durdur Önizleme';
+        previewAllBtn.classList.add('btn-primary');
+        videoEl.play().catch(function () {});
+    });
+
+    shortcutsToggle.addEventListener('click', function () {
+        const visible = shortcutsHelp.style.display !== 'none';
+        shortcutsHelp.style.display = visible ? 'none' : '';
+    });
+
+    // ---- kayıt akışı ----
+    let activeRecorder = null;
+    let activeChunks = [];
+    let activeCueId = null;
+    let decodeCtx = null;
+
+    function pickMimeType() {
+        const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+        for (const c of candidates) {
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) {
+                return c;
+            }
+        }
+        return '';
+    }
+
+    async function runCountdown() {
+        countdownBox.style.display = '';
+        for (let n = 3; n >= 1; n--) {
+            if (recordCancelled) return;
+            countdownBox.textContent = String(n);
+            await sleep(700);
+        }
+        countdownBox.style.display = 'none';
+    }
+
+    // Video, start_sec - 1.5'ten oynamaya başlar; ancak kayıt SADECE start_sec'te
+    // başlar. Bu bekleme kendi tuHandler'ını kullanır (merkezi dinleyici üzerinden),
+    // hiçbir stop koşulunu TETİKLEMEZ çünkü henüz recorder/timeUpdateHandler yok.
+    function runPreroll(startSec) {
+        return new Promise(function (resolve) {
+            const prerollStart = Math.max(0, startSec - 1.5);
+            videoEl.currentTime = prerollStart;
+            countdownBox.style.display = '';
+            countdownBox.textContent = 'Hazır ol';
+            let settled = false;
+            function finish() {
+                if (settled) return;
+                settled = true;
+                countdownBox.style.display = 'none';
+                resolve();
+            }
+            tuHandler = function () {
+                if (recordCancelled || videoEl.currentTime >= startSec - 0.03) finish();
+            };
+            videoEl.play().catch(finish);
+            scheduleTimer(finish, 4000);
+        });
+    }
+
+    function nextUnrecordedCue(cueId) {
+        const idx = cueRows.findIndex(function (r) { return r.dataset.cueId === String(cueId); });
+        for (let i = idx + 1; i < cueRows.length; i++) {
+            if (!recordings[cueRows[i].dataset.cueId]) return cueRows[i];
+        }
+        return null;
+    }
+
+    async function startRecording(cueId, startSec, endSec, text) {
+        if (activeOp === 'record') return;
+        if (!mediaStream) {
+            micStatus.textContent = 'Mikrofon henüz hazır değil. İzin ver ve tekrar dene.';
+            return;
+        }
+
+        // Merkezi durum SENKRON olarak burada kilitlenir (await'lerden ÖNCE) ki
+        // preroll/geri sayım sürerken başka bir işlem (kısayol, düğme, oto-sonraki)
+        // araya girip paylaşılan kayıt durumunu bozamasın.
+        stopCurrentOp();
+        activeOp = 'record';
+        activeCueId = cueId;
+        recordCancelled = false;
+        clearActiveTimers();
+
+        const recBtn = document.querySelector('.btn-rec[data-cue-id="' + cueId + '"]');
+        const stopBtn = document.querySelector('.btn-stop-rec[data-cue-id="' + cueId + '"]');
+        recBtn.disabled = true;
+
+        subtitleBox.textContent = text;
+        selectCue(cueId);
+        videoEl.muted = recordMuteDefault;
+
+        await ensureTake();
+        if (recordCancelled) {
+            recBtn.disabled = false;
+            activeOp = null;
+            activeCueId = null;
+            countdownBox.style.display = 'none';
+            return;
+        }
+
+        if (prerollToggle.checked) {
+            await runPreroll(startSec);
+        } else {
+            videoEl.currentTime = startSec;
+            await runCountdown();
+            if (!recordCancelled) videoEl.play().catch(function () {});
+        }
+        tuHandler = null;
+        if (recordCancelled) {
+            recBtn.disabled = false;
+            activeOp = null;
+            activeCueId = null;
+            countdownBox.style.display = 'none';
+            videoEl.pause();
+            return;
+        }
+
+        const mimeType = pickMimeType();
+        const options = mimeType ? { mimeType: mimeType } : undefined;
+        let recorder;
+        try {
+            recorder = new MediaRecorder(mediaStream, options);
+        } catch (e) {
+            recorder = new MediaRecorder(mediaStream);
+        }
+        activeRecorder = recorder;
+        activeChunks = [];
+
+        recorder.addEventListener('dataavailable', function (e) {
+            if (e.data && e.data.size > 0) activeChunks.push(e.data);
+        });
+
+        recorder.addEventListener('stop', function () {
+            waveBox.classList.remove('recording');
+            recBadge.style.display = 'none';
+            clearActiveTimers();
+
+            const blob = new Blob(activeChunks, { type: recorder.mimeType || 'audio/webm' });
+
+            recBtn.disabled = false;
+            stopBtn.style.display = 'none';
+            activeRecorder = null;
+            activeChunks = [];
+            activeCueId = null;
+            activeOp = null;
+
+            finishRecording(cueId, startSec, endSec, blob);
+        });
+
+        // Kaydın SADECE bu repliğin bitiş süresinde durması için: sınıra ulaşır
+        // ulaşmaz video SENKRON olarak duraklatılır ve dinleyici hemen sökülür —
+        // MediaRecorder'ın asenkron 'stop' olayını beklemek videonun bir sonraki
+        // repliğin alanına sürüklenmesine (asıl hataya) yol açıyordu.
+        tuHandler = function () {
+            const remaining = Math.max(0, endSec - videoEl.currentTime);
+            recCountdown.textContent = Math.ceil(remaining) + ' sn';
+            if (videoEl.currentTime >= endSec) stopRecording();
+        };
+
+        recorder.start();
+        waveBox.classList.add('recording');
+        recBadge.style.display = '';
+        stopBtn.style.display = '';
+
+        const maxDurationMs = Math.max(500, (endSec - startSec) * 1000 + 1500);
+        scheduleTimer(stopRecording, maxDurationMs);
+    }
+
+    function stopRecording() {
+        tuHandler = null;
+        videoEl.pause();
+        if (activeRecorder && activeRecorder.state !== 'inactive') {
+            activeRecorder.stop();
+        } else if (activeOp === 'record') {
+            // recorder henüz oluşturulmadı (preroll/geri sayım sırasında iptal edildi)
+            recordCancelled = true;
+        }
+    }
+
+    function measureBlobDurationViaAudioTag(blob) {
+        // decodeAudioData bazı çok kısa/bozuk webm parçalarında sessizce
+        // başarısız olabiliyor (küçük tuhalam dosyalar koruma dışı kalıyordu).
+        // Yedek yöntem: <audio> + loadedmetadata ile süreyi ölç.
+        return new Promise(function (resolve) {
+            const url = URL.createObjectURL(blob);
+            const audioTag = new Audio();
+            let settled = false;
+            function done(duration) {
+                if (settled) return;
+                settled = true;
+                URL.revokeObjectURL(url);
+                resolve(isFinite(duration) ? duration : null);
+            }
+            audioTag.addEventListener('loadedmetadata', function () { done(audioTag.duration); });
+            audioTag.addEventListener('error', function () { done(null); });
+            // Bilerek trackTimer/activeTimers'a değil, bağımsız bir zamanlayıcıya
+            // bağlanıyor: bu ölçüm, kayıt/dinleme "aktif işlem" durumunun parçası
+            // değil, yükleme öncesi bağımsız bir adım — yeni bir işlem başlarsa
+            // clearActiveTimers() tarafından iptal edilip Promise'in sonsuza kadar
+            // askıda kalmasını istemiyoruz.
+            setTimeout(function () { done(null); }, 3000);
+            audioTag.src = url;
+        });
+    }
+
+    async function measureBlobDuration(blob) {
+        try {
+            if (!decodeCtx) decodeCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const buf = await blob.arrayBuffer();
+            const decoded = await decodeCtx.decodeAudioData(buf);
+            if (isFinite(decoded.duration)) return decoded.duration;
+        } catch (err) {}
+        return measureBlobDurationViaAudioTag(blob);
+    }
+
+    // Yüklemeden önce süre kontrolü: kayıt beklenenin %50'sinden kısaysa yükleme
+    // yapılmaz ve mevcut kayıt (varsa) BOZULMAZ.
+    async function finishRecording(cueId, startSec, endSec, blob) {
+        const expected = endSec - startSec;
+        const actual = await measureBlobDuration(blob);
+        if (actual != null && isFinite(actual) && expected > 0 && actual < expected * 0.5) {
+            micStatus.textContent = 'Kayıt beklenenden çok kısa (' + actual.toFixed(1) + ' sn / ' + expected.toFixed(1) + ' sn) — tekrar dene.';
+            renderRowStatus(cueId);
+            return;
+        }
+        uploadRecording(cueId, blob);
+    }
+
+    async function uploadRecording(cueId, blob) {
+        const statusEl = document.getElementById('status-' + cueId);
+        statusEl.textContent = 'Yükleniyor...';
+        statusEl.className = 'status-dot';
+
+        const ext = (blob.type || '').indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+        const formData = new FormData();
+        formData.append('audio', blob, 'take.' + ext);
+
+        try {
+            const res = await fetch(`/take/${takeId}/rec/${cueId}`, { method: 'POST', body: formData });
+            const data = await res.json();
+            if (data.ok) {
+                recordings[cueId] = data.audio_url;
+            }
+        } catch (err) {
+            micStatus.textContent = 'Kayıt yüklenemedi, tekrar dene.';
+        }
+        renderRowStatus(cueId);
+        updateProgress();
+
+        if (recordings[cueId] && autoNextToggle.checked) {
+            const next = nextUnrecordedCue(cueId);
+            if (next) {
+                scheduleTimer(function () {
+                    startRecording(next.dataset.cueId, parseFloat(next.dataset.start), parseFloat(next.dataset.end), next.dataset.text);
+                }, 400);
+            }
+        }
+    }
+
+    async function deleteRecording(cueId) {
+        if (!takeId) return;
+        try {
+            await fetch(`/take/${takeId}/rec/${cueId}/delete`, { method: 'POST' });
+        } catch (err) {}
+        delete recordings[cueId];
+        renderRowStatus(cueId);
+        updateProgress();
+    }
+
+    document.querySelectorAll('.btn-rec').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            const row = document.querySelector('.cue-row[data-cue-id="' + btn.dataset.cueId + '"]');
+            startRecording(btn.dataset.cueId, parseFloat(row.dataset.start), parseFloat(row.dataset.end), row.dataset.text);
+        });
+    });
+
+    document.querySelectorAll('.btn-stop-rec').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            stopRecording();
+        });
+    });
+
+    document.querySelectorAll('.btn-del-rec').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            deleteRecording(btn.dataset.cueId);
+        });
+    });
+
+    document.querySelectorAll('.btn-listen-scene').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            listenScene(btn.dataset.cueId);
+        });
+    });
+
+    document.querySelectorAll('.btn-listen-dub').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            listenDub(btn.dataset.cueId);
+        });
+    });
+
+    document.getElementById('cueListBody').addEventListener('click', function (e) {
+        if (e.target.closest('button')) return;
+        const row = e.target.closest('.cue-row');
+        if (!row) return;
+        selectCue(row.dataset.cueId);
+    });
+
+    // ---- klavye kısayolları ----
+    function moveSelection(delta) {
+        let idx = cueRows.findIndex(function (r) { return r.dataset.cueId === String(selectedCueId); });
+        if (idx === -1) idx = 0;
+        const next = Math.min(cueRows.length - 1, Math.max(0, idx + delta));
+        const row = cueRows[next];
+        if (row) {
+            selectCue(row.dataset.cueId);
+            videoEl.currentTime = parseFloat(row.dataset.start);
+            updatePlayheadPosition();
+        }
+    }
+
+    document.addEventListener('keydown', function (e) {
+        const tag = (e.target && e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || (e.target && e.target.isContentEditable)) return;
+
+        if (e.key === ' ' || e.code === 'Space') {
+            e.preventDefault();
+            // Bir düğme (veya link/role=button) odaktaysa Boşluk hem kısayolu
+            // hem de düğmenin kendi tıklama davranışını tetikleyebilir. Odağı
+            // temizleyerek çift tetiklemeyi önlüyoruz (kısayol yine çalışır).
+            const focused = document.activeElement;
+            if (focused && (focused.tagName === 'BUTTON' || focused.tagName === 'A' || focused.getAttribute('role') === 'button')) {
+                focused.blur();
+            }
+            if (activeRecorder) { stopRecording(); return; }
+            const row = selectedCueId ? cueById(selectedCueId) : cueRows[0];
+            if (row) startRecording(row.dataset.cueId, parseFloat(row.dataset.start), parseFloat(row.dataset.end), row.dataset.text);
+        } else if (e.key === 'l' || e.key === 'L') {
+            if (selectedCueId) listenScene(selectedCueId);
+        } else if (e.key === 'p' || e.key === 'P') {
+            if (selectedCueId && recordings[selectedCueId]) listenDub(selectedCueId);
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            moveSelection(-1);
+        } else if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            moveSelection(1);
+        } else if (e.key === 'Escape') {
+            stopRecording();
+            stopSceneListen();
+            stopDubListen();
+            stopPreviewAll();
+        }
+    });
+
+    saveForm.addEventListener('submit', function () {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Montajlanıyor... (birkaç saniye sürebilir)';
+    });
+
+    // ---- arka planı koru seçeneği (ses ayırma durumu) ----
+    const keepBgCheckbox = document.getElementById('keepBgCheckbox');
+    const keepBgHint = document.getElementById('keepBgHint');
+
+    function applySeparationStatus(data) {
+        if (!keepBgCheckbox) return;
+        if (data && data.status === 'done') {
+            keepBgCheckbox.disabled = false;
+            keepBgCheckbox.checked = true;
+            keepBgHint.style.display = 'none';
+        } else {
+            keepBgCheckbox.disabled = true;
+            keepBgCheckbox.checked = false;
+            keepBgHint.style.display = '';
+        }
+    }
+
+    function loadSeparationStatus() {
+        fetch(`/api/video/${videoId}/separation`)
+            .then(function (res) { return res.json(); })
+            .then(applySeparationStatus)
+            .catch(function () { applySeparationStatus(null); });
+    }
+
+    initMic();
+    hydrateRecordings();
+    loadWaveform();
+    loadSeparationStatus();
+})();
+</script>
+{% endblock %}

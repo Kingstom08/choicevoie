@@ -1,0 +1,5 @@
+<nav class="tabs">
+    <a href="/admin/{{ video.id }}" class="tab{% if active == 'admin' %} active{% endif %}">Admin panel</a>
+    <a href="/dub/{{ video.id }}" class="tab{% if active == 'dub' %} active{% endif %}">Kullanıcı</a>
+    <a href="/takes/{{ video.id }}" class="tab{% if active == 'takes' %} active{% endif %}">Öncekiler</a>
+</nav>

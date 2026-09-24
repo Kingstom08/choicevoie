@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Öncekiler - {{ video.title }}{% endblock %}
+{% block content %}
+<h1>Öncekiler: {{ video.title }}</h1>
+{% set active = 'takes' %}
+{% include "_tabs.html" %}
+<p><a href="/" class="btn">Video listesi</a></p>
+
+{% if error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
+
+<section class="card">
+    <h2>Kaydedilmiş Dublajlar</h2>
+    {% if takes %}
+    <table class="cue-table">
+        <thead>
+            <tr><th>İsim</th><th>Tarih</th><th>Durum</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for t in takes %}
+            <tr class="cue-row" onclick="if(event.target.tagName!=='BUTTON'){window.location='/take/{{ t.id }}';}">
+                <td><a href="/take/{{ t.id }}">{{ t.name }}</a></td>
+                <td>{{ t.created_at }}</td>
+                <td>
+                    {% if t.status == 'done' %}
+                    <span class="badge badge-ok">Hazır</span>
+                    {% elif t.status == 'rendering' %}
+                    <span class="badge badge-warn">Montajlanıyor</span>
+                    {% elif t.status == 'error' %}
+                    <span class="badge badge-err">Hata</span>
+                    {% else %}
+                    <span class="badge badge-muted">Yarım</span>
+                    {% endif %}
+                </td>
+                <td class="actions">
+                    <form action="/take/{{ t.id }}/delete" method="post" onsubmit="return confirm('Dublaj silinsin mi?');">
+                        <button type="submit" class="btn btn-danger">Sil</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Henüz dublaj kaydedilmemiş. <a href="/dub/{{ video.id }}">Dublaj yap</a></p>
+    {% endif %}
+</section>
+{% endblock %}
