@@ -9,26 +9,73 @@
 {% include "_tabs.html" %}
 <p><a href="/takes/{{ video.id }}" class="btn">Öncekiler listesi</a></p>
 
-{% if take.status == 'done' %}
-<section class="card">
-    <video controls src="/output/{{ take.output_file }}"></video>
-    <div class="actions" style="margin-top:10px">
-        <a href="/output/{{ take.output_file }}" download class="btn btn-primary">İndir</a>
-    </div>
-</section>
+{% if error is defined and error %}
+<div class="alert">{{ error }}</div>
+{% endif %}
 
+{% set recs = recordings if (recordings is defined and recordings) else {} %}
+{% set bgv = take.bg_volume if (take.bg_volume is defined and take.bg_volume is not none) else 100 %}
+
+{% macro rerender_panel() %}
+<section class="card">
+    <h2>Yeniden Montajla</h2>
+    {% if recordings_changed is defined and recordings_changed %}
+    <div class="sep-stale" style="margin-bottom:12px">
+        <p>Bu dublajda kayıtlar son montajdan sonra değişti — video güncel değil, yeniden montajla.</p>
+    </div>
+    {% endif %}
+    <p class="muted">Arka plan sesi baskın geldiyse kayıtları yeniden yapmana gerek yok: seviyeyi değiştirip videoyu yeniden oluştur.</p>
+    <form action="/take/{{ take.id }}/rerender" method="post" id="rerenderForm">
+        <div class="checkbox-row">
+            <label>
+                <input type="checkbox" name="keep_background" value="1" {% if take.keep_background %}checked{% endif %}>
+                Replik aralığında arka plan sesini koru (müzik/efekt sussun istemiyorum)
+            </label>
+        </div>
+        <div class="checkbox-row" style="margin-top:12px">
+            <label for="rvRange">Arka plan / video sesi seviyesi: <output id="rvLabel" for="rvRange">{% if bgv == 0 %}Kapalı{% else %}%{{ bgv }}{% endif %}</output></label>
+            <input type="range" name="bg_volume" id="rvRange" min="0" max="150" step="5" value="{{ bgv }}"
+                   style="width:230px;padding:0;accent-color:var(--acc)">
+            <div class="actions" style="margin-top:6px">
+                <button type="button" class="btn" data-rv="100">%100</button>
+                <button type="button" class="btn" data-rv="50">%50</button>
+                <button type="button" class="btn" data-rv="25">%25</button>
+                <button type="button" class="btn" data-rv="0">Kapalı</button>
+            </div>
+        </div>
+        <div class="actions" style="margin-top:14px">
+            <button type="submit" class="btn btn-primary" id="rerenderBtn">Yeniden Montajla</button>
+            <span class="muted" id="rerenderHint">Montaj birkaç saniye sürebilir.</span>
+        </div>
+    </form>
+</section>
+{% endmacro %}
+
+{% macro cue_table() %}
 <section class="card">
     <h2>Replikler</h2>
     {% if cues %}
+    <p class="muted">Beğenmediğin bir repliği yeniden kaydedip videoyu tekrar alabilirsin.</p>
     <table class="cue-table">
         <thead>
-            <tr><th>Zaman</th><th>Metin</th></tr>
+            <tr><th>Zaman</th><th>Metin</th><th>Kayıt</th><th>İşlem</th></tr>
         </thead>
         <tbody>
             {% for c in cues %}
+            {% set rec_url = recs.get(c.id) or recs.get(c.id|string) %}
             <tr>
                 <td>{{ "%.1f"|format(c.start_sec) }}–{{ "%.1f"|format(c.end_sec) }} sn</td>
                 <td>{{ c.text }}</td>
+                <td>
+                    {% if rec_url %}
+                    <audio controls preload="none" src="{{ rec_url }}"></audio>
+                    {% else %}
+                    <span class="badge badge-muted">Yok</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a class="btn" href="/dub/{{ video.id }}?take={{ take.id }}&amp;cue={{ c.id }}">{% if rec_url %}Yeniden Kaydet{% else %}Kaydet{% endif %}</a>
+                </td>
             </tr>
             {% endfor %}
         </tbody>
@@ -37,9 +84,37 @@
     <p class="muted">Replik bulunamadı.</p>
     {% endif %}
 </section>
+{% endmacro %}
+
+{% if take.status == 'done' %}
+<section class="card">
+    <video controls src="/output/{{ take.output_file }}"></video>
+    <div class="actions" style="margin-top:10px">
+        <a href="/output/{{ take.output_file }}" download class="btn btn-primary">İndir</a>
+        <a href="/dub/{{ video.id }}?take={{ take.id }}" class="btn">Dublaj ekranında aç</a>
+    </div>
+</section>
+
+{{ rerender_panel() }}
+{{ cue_table() }}
 
 {% elif take.status == 'error' %}
 <div class="alert">{{ take.error }}</div>
+{% if take.output_file %}
+<section class="card">
+    <p class="muted">Önceki montaj hâlâ izlenebilir:</p>
+    <video controls src="/output/{{ take.output_file }}"></video>
+    <div class="actions" style="margin-top:10px">
+        <a href="/output/{{ take.output_file }}" download class="btn">İndir</a>
+        <a href="/dub/{{ video.id }}?take={{ take.id }}" class="btn">Dublaj ekranında aç</a>
+    </div>
+</section>
+{% else %}
+<p><a href="/dub/{{ video.id }}?take={{ take.id }}" class="btn">Dublaj ekranında aç</a></p>
+{% endif %}
+
+{{ rerender_panel() }}
+{{ cue_table() }}
 
 {% elif take.status == 'rendering' %}
 <section class="card">
@@ -51,4 +126,33 @@
     <p class="muted">Bu dublaj henüz kaydedilmemiş. <a href="/dub/{{ video.id }}?take={{ take.id }}">Devam et</a></p>
 </section>
 {% endif %}
+
+<script>
+(function () {
+    const form = document.getElementById('rerenderForm');
+    if (!form) return;
+    const range = document.getElementById('rvRange');
+    const label = document.getElementById('rvLabel');
+    const btn = document.getElementById('rerenderBtn');
+
+    function updateLabel() {
+        const pct = parseInt(range.value, 10);
+        label.textContent = (isFinite(pct) && pct === 0) ? 'Kapalı' : '%' + range.value;
+        range.setAttribute('aria-valuetext', label.textContent);
+    }
+
+    range.addEventListener('input', updateLabel);
+    form.querySelectorAll('[data-rv]').forEach(function (b) {
+        b.addEventListener('click', function () {
+            range.value = b.dataset.rv;
+            updateLabel();
+        });
+    });
+    form.addEventListener('submit', function () {
+        btn.disabled = true;
+        btn.textContent = 'Montajlanıyor... (birkaç saniye sürebilir)';
+    });
+    updateLabel();
+})();
+</script>
 {% endblock %}

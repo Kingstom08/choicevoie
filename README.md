@@ -133,6 +133,24 @@ videolarını ve kayıtlarını paylaşma konusunda dikkatli ol; telif hakkı ol
 yükleme/dağıtma sorumluluğu kullanıcıya aittir. YouTube indirme özelliği yalnızca hakkına
 sahip olunan ya da indirmesine izin verilen içerikler için kullanılmalıdır.
 
+### Tek seferlik bakım: yetim kayıt temizliği
+
+Bu sürümle birlikte uygulama **ilk açılışta** veritabanındaki *yetim* dublaj kayıtlarını
+(cue'su silinmiş, hiçbir montaja giremeyen `recordings` satırları) siler ve karşılık gelen
+ses dosyalarını `uploads/rec/` klasöründen kaldırır. Temizlik yapıldığında konsola
+`[bakim] N yetim kayit temizlendi` satırı yazılır.
+
+**Bu işlem geri alınamaz (dosya silinir).** İlk açılıştan önce yedek almanız önerilir:
+
+```bash
+cp choosvoie.db choosvoie.db.yedek
+cp -R uploads/rec uploads/rec.yedek
+```
+
+Temizlik idempotenttir: yetim kayıt kalmadığında sonraki açılışlarda hiçbir şey yapmaz ve
+log satırı yazmaz. Bundan sonra bir replik silindiğinde ona ait kayıtlar zaten anında
+temizlendiği için yetim kayıt birikmez.
+
 ## Bilinen sınırlar
 
 - Kimlik doğrulama yoktur — uygulama yerel kullanım içindir.

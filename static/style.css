@@ -180,3 +180,33 @@ code{background:#12141a;border:1px solid var(--line);border-radius:4px;padding:1
 /* --- replikleri otomatik oluştur: ilerleme (sep-progress ile aynı desen) --- */
 .auto-progress{height:8px;border-radius:4px;background:#0e1014;border:1px solid var(--line);overflow:hidden;margin-bottom:8px}
 .auto-progress-fill{height:100%;width:0;background:var(--acc);transition:width .3s ease}
+
+/* --- admin: replik satırı işlem hücresi (Düzenle + Sil yan yana) --- */
+.cue-actions{white-space:nowrap}
+.cue-actions .cue-delete-form{display:inline-block;margin-left:6px}
+.cue-actions .btn+.btn{margin-left:6px}
+
+/* --- admin: satır içi replik düzenleme --- */
+.cue-row.editing,.cue-row.editing:hover{background:#242932;cursor:default}
+.cue-row.saving{opacity:.6}
+.cue-edit-cell{display:flex;align-items:center;gap:4px}
+.cue-edit-input{background:#12141a;border:1px solid var(--acc);color:var(--fg);border-radius:5px;padding:5px 7px;font:inherit;font-size:13px}
+.cue-edit-input:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+.cue-edit-input[type=number]{width:82px}
+.cue-edit-input[type=text]{width:100%;min-width:0}
+.cue-edit-dur{color:var(--mut);white-space:nowrap}
+.cue-edit-dur.dur-invalid{color:var(--danger)}
+
+/* --- admin: ⏱ şu anki zamanı al düğmesi (.time-link deseniyle aynı) --- */
+.time-grab{background:transparent;border:1px solid var(--line);color:var(--acc);border-radius:5px;padding:4px 7px;font:inherit;font-size:13px;line-height:1.1;cursor:pointer}
+.time-grab:hover{background:#242932;border-color:var(--acc)}
+.time-grab:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+
+/* --- admin: toplu zaman kaydırma satırı --- */
+.shift-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 12px;font-size:13px;color:var(--mut)}
+.shift-row label{color:var(--mut)}
+.shift-row .shift-input{width:82px}
+@media(max-width:900px){
+    .shift-row{gap:6px}
+    .cue-edit-input[type=number],.shift-row .shift-input{width:72px}
+}

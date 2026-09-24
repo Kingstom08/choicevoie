@@ -6,7 +6,7 @@
 {% include "_tabs.html" %}
 <p><a href="/" class="btn">Video listesi</a></p>
 
-<div id="alertBox" class="alert"{% if not error %} hidden{% endif %}>{{ error or '' }}</div>
+<div id="alertBox" class="alert" role="status" aria-live="polite"{% if not error %} hidden{% endif %}>{{ error or '' }}</div>
 
 <div class="admin-layout">
     <div class="admin-video">
@@ -52,18 +52,26 @@
         <section class="card">
             <h2>Cue Listesi</h2>
             <p class="cue-summary" id="cueSummary">{{ cues|length }} replik · toplam {{ '%.1f'|format(cues|sum(attribute='end_sec') - cues|sum(attribute='start_sec')) }} sn</p>
+            <div class="shift-row" id="shiftRow"{% if not cues %} hidden{% endif %}>
+                <label for="shiftInput">Tümünü kaydır (sn)</label>
+                <input type="number" step="0.1" id="shiftInput" class="shift-input" value="-0.5">
+                <button type="button" class="btn" data-shift="-0.5" aria-label="Kaydırma değerini 0,5 saniye geri yap">−0.5</button>
+                <button type="button" class="btn" data-shift="0.5" aria-label="Kaydırma değerini 0,5 saniye ileri yap">+0.5</button>
+                <button type="button" class="btn btn-primary" id="shiftApplyBtn">Uygula</button>
+            </div>
             <table class="cue-table" id="cueTable"{% if not cues %} hidden{% endif %}>
                 <thead>
-                    <tr><th>Başlangıç</th><th>Bitiş</th><th>Süre</th><th>Metin</th><th></th></tr>
+                    <tr><th>Başlangıç</th><th>Bitiş</th><th>Süre</th><th>Metin</th><th>İşlem</th></tr>
                 </thead>
                 <tbody id="cueTbody">
                     {% for c in cues %}
-                    <tr class="cue-row" data-id="{{ c.id }}" data-start="{{ c.start_sec }}">
+                    <tr class="cue-row" data-id="{{ c.id }}" data-start="{{ c.start_sec }}" data-end="{{ c.end_sec }}" data-text="{{ c.text|e }}">
                         <td><button type="button" class="time-link" data-time="{{ c.start_sec }}" title="{{ '%.1f'|format(c.start_sec) }} saniyeye git" aria-label="{{ '%.1f'|format(c.start_sec) }} saniyeye git">{{ '%.1f'|format(c.start_sec) }} sn</button></td>
                         <td><button type="button" class="time-link" data-time="{{ c.end_sec }}" title="{{ '%.1f'|format(c.end_sec) }} saniyeye git" aria-label="{{ '%.1f'|format(c.end_sec) }} saniyeye git">{{ '%.1f'|format(c.end_sec) }} sn</button></td>
                         <td>{{ '%.1f'|format(c.end_sec - c.start_sec) }} sn</td>
                         <td>{{ c.text }}</td>
-                        <td>
+                        <td class="cue-actions">
+                            <button type="button" class="btn btn-edit" aria-label="Repliği düzenle: {{ c.text }}">Düzenle</button>
                             <form action="/cue/{{ c.id }}/delete" method="post" class="cue-delete-form">
                                 <button type="submit" class="btn btn-danger">Sil</button>
                             </form>
@@ -236,6 +244,9 @@
     var tbody = document.getElementById('cueTbody');
     var emptyMsg = document.getElementById('cueEmpty');
     var summaryEl = document.getElementById('cueSummary');
+    var shiftRow = document.getElementById('shiftRow');
+    var shiftInput = document.getElementById('shiftInput');
+    var shiftApplyBtn = document.getElementById('shiftApplyBtn');
 
     document.getElementById('btnGetStart').addEventListener('click', function () {
         startInput.value = video.currentTime.toFixed(1);
@@ -278,6 +289,69 @@
         return btn;
     }
 
+    // cue id -> sunucudan gelen süre uyarısı (satırda rozet olarak gösterilir)
+    var rowWarnings = {};
+
+    // Bir satırı okuma moduna döndürür. Veriyi satırın data-* özniteliklerinden
+    // okur; böylece hem Jinja ile basılan hem JS ile üretilen satırlar aynı kodu
+    // kullanır.
+    function fillRowView(tr) {
+        var id = tr.dataset.id;
+        var start = parseFloat(tr.dataset.start);
+        var end = parseFloat(tr.dataset.end);
+        var text = tr.dataset.text || '';
+        var warning = rowWarnings[String(id)];
+
+        tr.classList.remove('editing', 'saving');
+        tr.innerHTML = '';
+
+        var tdStart = document.createElement('td');
+        tdStart.appendChild(makeTimeLink(start));
+
+        var tdEnd = document.createElement('td');
+        tdEnd.appendChild(makeTimeLink(end));
+
+        var tdDur = document.createElement('td');
+        tdDur.textContent = fmt(end - start) + ' sn';
+
+        var tdText = document.createElement('td');
+        tdText.appendChild(document.createTextNode(text));
+        if (warning) {
+            var badge = document.createElement('span');
+            badge.className = 'warn-badge';
+            badge.textContent = 'süre değişti';
+            badge.title = warning;
+            tdText.appendChild(badge);
+        }
+
+        var tdActions = document.createElement('td');
+        tdActions.className = 'cue-actions';
+        var editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'btn btn-edit';
+        editBtn.textContent = 'Düzenle';
+        editBtn.setAttribute('aria-label', 'Repliği düzenle: ' + text);
+        tdActions.appendChild(editBtn);
+
+        var delForm = document.createElement('form');
+        delForm.action = '/cue/' + id + '/delete';
+        delForm.method = 'post';
+        delForm.className = 'cue-delete-form';
+        var delBtn = document.createElement('button');
+        delBtn.type = 'submit';
+        delBtn.className = 'btn btn-danger';
+        delBtn.textContent = 'Sil';
+        delForm.appendChild(delBtn);
+        tdActions.appendChild(delForm);
+
+        tr.appendChild(tdStart);
+        tr.appendChild(tdEnd);
+        tr.appendChild(tdDur);
+        tr.appendChild(tdText);
+        tr.appendChild(tdActions);
+        return tr;
+    }
+
     function renderCues(cues, highlightId) {
         var sorted = cues.slice().sort(function (a, b) { return a.start_sec - b.start_sec; });
         tbody.innerHTML = '';
@@ -287,36 +361,10 @@
             tr.className = 'cue-row';
             tr.dataset.id = c.id;
             tr.dataset.start = c.start_sec;
+            tr.dataset.end = c.end_sec;
+            tr.dataset.text = c.text;
 
-            var tdStart = document.createElement('td');
-            tdStart.appendChild(makeTimeLink(c.start_sec));
-
-            var tdEnd = document.createElement('td');
-            tdEnd.appendChild(makeTimeLink(c.end_sec));
-
-            var tdDur = document.createElement('td');
-            tdDur.textContent = fmt(c.end_sec - c.start_sec) + ' sn';
-
-            var tdText = document.createElement('td');
-            tdText.textContent = c.text;
-
-            var tdActions = document.createElement('td');
-            var delForm = document.createElement('form');
-            delForm.action = '/cue/' + c.id + '/delete';
-            delForm.method = 'post';
-            delForm.className = 'cue-delete-form';
-            var delBtn = document.createElement('button');
-            delBtn.type = 'submit';
-            delBtn.className = 'btn btn-danger';
-            delBtn.textContent = 'Sil';
-            delForm.appendChild(delBtn);
-            tdActions.appendChild(delForm);
-
-            tr.appendChild(tdStart);
-            tr.appendChild(tdEnd);
-            tr.appendChild(tdDur);
-            tr.appendChild(tdText);
-            tr.appendChild(tdActions);
+            fillRowView(tr);
 
             if (highlightId != null && String(c.id) === String(highlightId)) {
                 tr.classList.add('row-highlight');
@@ -329,9 +377,11 @@
         if (sorted.length === 0) {
             table.hidden = true;
             emptyMsg.hidden = false;
+            if (shiftRow) shiftRow.hidden = true;
         } else {
             table.hidden = false;
             emptyMsg.hidden = true;
+            if (shiftRow) shiftRow.hidden = false;
         }
 
         var total = sorted.reduce(function (sum, c) { return sum + (c.end_sec - c.start_sec); }, 0);
@@ -366,8 +416,278 @@
         return parseParamFromUrl(url, 'ok');
     }
 
+    // ---- Satır içi replik düzenleme ----
+    // Düzenleme kutusuna yazılacak değer. Tabloda süreler 1 ondalıkla gösterilir
+    // ama kayıttaki gerçek değer 2 ondalıklı olabilir (ör. 2.64). Kutuya fmt()
+    // yazılsaydı kullanıcı metni düzeltip kaydettiğinde zaman sessizce kayardı.
+    // Burada yalnızca kayan nokta gürültüsü temizlenir (0.8999999999999999 -> 0.9).
+    function editValue(n) {
+        return String(parseFloat(Number(n).toFixed(2)));
+    }
+
+    function makeEditInput(type, field, value, label) {
+        var input = document.createElement('input');
+        input.type = type;
+        input.className = 'cue-edit-input';
+        input.dataset.field = field;
+        if (type === 'number') {
+            input.step = '0.01';
+            input.min = '0';
+        }
+        input.value = value;
+        input.setAttribute('aria-label', label);
+        return input;
+    }
+
+    function makeGrabBtn(which) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        // DİKKAT: .time-link sınıfı VERİLMEZ, yoksa tıklama videoyu zıplatır.
+        btn.className = 'btn time-grab';
+        btn.dataset.grab = which;
+        btn.textContent = '⏱';
+        var label = which === 'start'
+            ? 'Videonun şu anki zamanını başlangıç olarak al'
+            : 'Videonun şu anki zamanını bitiş olarak al';
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+        return btn;
+    }
+
+    function updateEditDuration(tr) {
+        var durCell = tr.querySelector('.cue-edit-dur');
+        var startField = tr.querySelector('[data-field="start"]');
+        var endField = tr.querySelector('[data-field="end"]');
+        if (!durCell || !startField || !endField) return;
+        var s = parseFloat(startField.value);
+        var e = parseFloat(endField.value);
+        if (isNaN(s) || isNaN(e)) {
+            durCell.textContent = '—';
+            durCell.classList.remove('dur-invalid');
+            return;
+        }
+        var d = e - s;
+        durCell.textContent = fmt(d) + ' sn';
+        durCell.classList.toggle('dur-invalid', d <= 0);
+    }
+
+    function grabTime(tr, which) {
+        var field = tr.querySelector('[data-field="' + which + '"]');
+        if (!field) return;
+        field.value = video.currentTime.toFixed(1);
+        updateEditDuration(tr);
+        field.focus();
+    }
+
+    function cancelEdit(focusBack) {
+        var tr = tbody.querySelector('tr.editing');
+        if (!tr) return;
+        fillRowView(tr);
+        if (focusBack) {
+            var btn = tr.querySelector('.btn-edit');
+            if (btn) btn.focus();
+        }
+    }
+
+    function enterEdit(tr) {
+        // Aynı anda yalnızca tek satır düzenlenebilir.
+        cancelEdit(false);
+        clearError();
+
+        var start = parseFloat(tr.dataset.start);
+        var end = parseFloat(tr.dataset.end);
+        var text = tr.dataset.text || '';
+
+        tr.innerHTML = '';
+        tr.classList.add('editing');
+
+        var tdStart = document.createElement('td');
+        var startCell = document.createElement('div');
+        startCell.className = 'cue-edit-cell';
+        startCell.appendChild(makeEditInput('number', 'start', editValue(start), 'Başlangıç saniyesi'));
+        startCell.appendChild(makeGrabBtn('start'));
+        tdStart.appendChild(startCell);
+
+        var tdEnd = document.createElement('td');
+        var endCell = document.createElement('div');
+        endCell.className = 'cue-edit-cell';
+        endCell.appendChild(makeEditInput('number', 'end', editValue(end), 'Bitiş saniyesi'));
+        endCell.appendChild(makeGrabBtn('end'));
+        tdEnd.appendChild(endCell);
+
+        var tdDur = document.createElement('td');
+        tdDur.className = 'cue-edit-dur';
+        tdDur.textContent = fmt(end - start) + ' sn';
+
+        var tdText = document.createElement('td');
+        tdText.appendChild(makeEditInput('text', 'text', text, 'Replik metni'));
+
+        var tdActions = document.createElement('td');
+        tdActions.className = 'cue-actions';
+        var saveBtn = document.createElement('button');
+        saveBtn.type = 'button';
+        saveBtn.className = 'btn btn-primary';
+        saveBtn.dataset.action = 'save';
+        saveBtn.textContent = 'Kaydet';
+        var cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.className = 'btn';
+        cancelBtn.dataset.action = 'cancel';
+        cancelBtn.textContent = 'İptal';
+        tdActions.appendChild(saveBtn);
+        tdActions.appendChild(cancelBtn);
+
+        tr.appendChild(tdStart);
+        tr.appendChild(tdEnd);
+        tr.appendChild(tdDur);
+        tr.appendChild(tdText);
+        tr.appendChild(tdActions);
+
+        var first = tr.querySelector('[data-field="start"]');
+        if (first) {
+            first.focus();
+            first.select();
+        }
+    }
+
+    function saveEdit(tr) {
+        var startField = tr.querySelector('[data-field="start"]');
+        var endField = tr.querySelector('[data-field="end"]');
+        var textField = tr.querySelector('[data-field="text"]');
+        if (!startField || !endField || !textField) return;
+
+        var id = tr.dataset.id;
+        var s = parseFloat(startField.value);
+        var e = parseFloat(endField.value);
+        var txt = textField.value.trim();
+
+        clearError();
+        if (isNaN(s) || isNaN(e)) {
+            showError('Başlangıç ve bitiş saniyesi sayı olmalı.');
+            startField.focus();
+            return;
+        }
+        if (s < 0) {
+            showError('Başlangıç 0 saniyeden küçük olamaz.');
+            startField.focus();
+            return;
+        }
+        if (e <= s) {
+            showError('Bitiş, başlangıçtan büyük olmalı.');
+            endField.focus();
+            return;
+        }
+        if (txt === '') {
+            showError('Replik metni boş olamaz.');
+            textField.focus();
+            return;
+        }
+
+        var saveBtn = tr.querySelector('[data-action="save"]');
+        var cancelBtn = tr.querySelector('[data-action="cancel"]');
+        var originalLabel = saveBtn ? saveBtn.textContent : '';
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Kaydediliyor…';
+        }
+        if (cancelBtn) cancelBtn.disabled = true;
+        tr.classList.add('saving');
+
+        var fd = new FormData();
+        fd.append('start_sec', s);
+        fd.append('end_sec', e);
+        fd.append('text', txt);
+
+        var httpStatus = 0;
+        fetch('/api/cue/' + id + '/update', { method: 'POST', body: fd })
+            .then(function (res) {
+                httpStatus = res.status;
+                return res.json().catch(function () { return null; });
+            })
+            .then(function (data) {
+                if (!data || data.ok !== true) {
+                    // Hata: düzenleme modu AÇIK kalır ki kullanıcı düzeltebilsin.
+                    showError((data && data.error) || ('Replik güncellenemedi (HTTP ' + httpStatus + ').'));
+                    return null;
+                }
+                var cue = data.cue || {};
+                var cueId = cue.id != null ? cue.id : id;
+                if (data.warning) rowWarnings[String(cueId)] = data.warning;
+                else delete rowWarnings[String(cueId)];
+
+                return loadCues().then(function (cues) {
+                    renderCues(cues, cueId);
+                    if (data.warning) showOk(data.warning);
+                    else showOk('Replik güncellendi.');
+                    // Satır yeniden kurulduğu için odak kaybolur; klavye
+                    // kullanıcısını aynı satırın Düzenle düğmesine geri koy.
+                    var newRow = tbody.querySelector('tr[data-id="' + cueId + '"]');
+                    var backBtn = newRow ? newRow.querySelector('.btn-edit') : null;
+                    if (backBtn) backBtn.focus();
+                    // Zamanlama değiştiyse ayırma "stale" olabilir; paneli tazele.
+                    if (data.timing_changed === true) fetchSepStatus();
+                });
+            })
+            .catch(function () {
+                showError('Replik güncellenirken bir hata oluştu (ağ hatası).');
+            })
+            .finally(function () {
+                if (saveBtn) {
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = originalLabel;
+                }
+                if (cancelBtn) cancelBtn.disabled = false;
+                tr.classList.remove('saving');
+            });
+    }
+
+    // Süre hücresi input değiştikçe canlı güncellenir
+    tbody.addEventListener('input', function (e) {
+        var field = e.target.closest('.cue-edit-input');
+        if (!field) return;
+        var tr = field.closest('tr.editing');
+        if (tr) updateEditDuration(tr);
+    });
+
+    // Enter = kaydet, Escape = iptal (yalnızca düzenleme alanlarında)
+    tbody.addEventListener('keydown', function (e) {
+        var field = e.target.closest('.cue-edit-input');
+        if (!field) return;
+        var tr = field.closest('tr.editing');
+        if (!tr) return;
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            saveEdit(tr);
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancelEdit(true);
+        }
+    });
+
     // Saniye düğmeleri ve satıra tıklama (silme düğmesi/formu hariç) - event delegation
     tbody.addEventListener('click', function (e) {
+        // Düzenleme modundaki satırda tıklama videoyu ASLA zıplatmamalı;
+        // sadece Kaydet/İptal ve ⏱ düğmeleri iş görür.
+        var editingRow = e.target.closest('tr.editing');
+        if (editingRow) {
+            var actionBtn = e.target.closest('[data-action]');
+            if (actionBtn) {
+                if (actionBtn.dataset.action === 'save') saveEdit(editingRow);
+                else cancelEdit(true);
+                return;
+            }
+            var grabBtn = e.target.closest('[data-grab]');
+            if (grabBtn) grabTime(editingRow, grabBtn.dataset.grab);
+            return;
+        }
+
+        var editBtn = e.target.closest('.btn-edit');
+        if (editBtn) {
+            var editTarget = editBtn.closest('tr[data-id]');
+            if (editTarget) enterEdit(editTarget);
+            return;
+        }
+
         var timeBtn = e.target.closest('.time-link');
         if (timeBtn) {
             var t = parseFloat(timeBtn.dataset.time);
@@ -396,6 +716,74 @@
             .catch(function () { showError('Silme işlemi başarısız oldu.'); })
             .finally(function () { if (btn) btn.disabled = false; });
     });
+
+    // ---- Toplu zaman kaydırma ----
+    function applyShift(offset, confirmed) {
+        var fd = new FormData();
+        fd.append('offset_sec', offset);
+        if (confirmed) fd.append('confirm', '1');
+
+        var httpStatus = 0;
+        return fetch('/api/video/' + videoId + '/cues/shift', { method: 'POST', body: fd })
+            .then(function (res) {
+                httpStatus = res.status;
+                return res.json().catch(function () { return null; });
+            })
+            .then(function (data) {
+                if (httpStatus === 409 && data && data.needs_confirm && !confirmed) {
+                    var msg = data.error || 'Bu videoda dublaj kayıtları var; tüm replikleri kaydırmak senkronu bozar.';
+                    if (!confirm(msg + ' Devam edilsin mi?')) return null;
+                    return applyShift(offset, true);
+                }
+                if (!data || data.ok !== true) {
+                    showError((data && data.error) || ('Replikler kaydırılamadı (HTTP ' + httpStatus + ').'));
+                    return null;
+                }
+                rowWarnings = {};
+                renderCues(data.cues || []);
+                showOk(data.updated + ' replik ' + fmt(data.offset_sec) + ' sn kaydırıldı');
+                fetchSepStatus();
+                return data;
+            })
+            .catch(function () {
+                showError('Kaydırma sırasında bir hata oluştu (ağ hatası).');
+                return null;
+            });
+    }
+
+    if (shiftRow) {
+        shiftRow.addEventListener('click', function (e) {
+            var preset = e.target.closest('[data-shift]');
+            if (!preset) return;
+            shiftInput.value = preset.dataset.shift;
+            shiftInput.focus();
+        });
+    }
+
+    if (shiftApplyBtn) {
+        shiftApplyBtn.addEventListener('click', function () {
+            clearError();
+            var offset = parseFloat(shiftInput.value);
+            if (isNaN(offset)) {
+                showError('Kaydırma miktarı sayı olmalı.');
+                shiftInput.focus();
+                return;
+            }
+            if (offset === 0) {
+                showError('Kaydırma miktarı 0 olamaz.');
+                shiftInput.focus();
+                return;
+            }
+            cancelEdit(false);
+            shiftApplyBtn.disabled = true;
+            var originalLabel = shiftApplyBtn.textContent;
+            shiftApplyBtn.textContent = 'Kaydırılıyor…';
+            applyShift(offset, false).finally(function () {
+                shiftApplyBtn.disabled = false;
+                shiftApplyBtn.textContent = originalLabel;
+            });
+        });
+    }
 
     // Cue ekleme formu - sayfa yenilemeden, video pozisyonu korunur
     form.addEventListener('submit', function (e) {

@@ -92,6 +92,17 @@ def _is_apple_silicon() -> bool:
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BIN_DIR = os.path.join(BASE_DIR, "bin")
+
+# Proje bin/ klasorunu PATH'in BASINA ekle. Bazi bagimliliklar (ozellikle
+# mlx_whisper/audio.py) sesi okumak icin dogrudan PATH'ten "ffmpeg" calistirir;
+# biz ffmpeg'i bin/ icinde tuttugumuz icin PATH'te olmazsa o cagri
+# FileNotFoundError ile patlar ve sessizce yavas yola dusulur.
+# Platformdan bagimsizdir: Windows'ta ayni klasordeki ffmpeg.exe bulunur.
+# (Ikilinin kendisi _ffmpeg_location() tarafindan tembel olusturulur; klasor
+# o an yoksa PATH girdisi zararsizdir.)
+os.environ["PATH"] = BIN_DIR + os.pathsep + os.environ.get("PATH", "")
+
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 REC_DIR = os.path.join(UPLOADS_DIR, "rec")
 WAVE_DIR = os.path.join(UPLOADS_DIR, "wave")
@@ -141,6 +152,11 @@ AUTOCUE_LOCK = threading.Lock()
 WHISPER_MODEL = None
 WHISPER_DEVICE = None
 WHISPER_LOCK = threading.Lock()
+
+
+def safe_filename(name: str) -> str:
+    """Sadece dosya adını al (yol bileşenlerini at), path traversal engelle."""
+    return os.path.basename(name or "")
 
 
 def get_db():
@@ -211,16 +227,32 @@ def init_db():
     if "keep_background" not in take_cols:
         conn.execute("ALTER TABLE takes ADD COLUMN keep_background INTEGER DEFAULT 0")
 
+    # Arka plan ses seviyesi (yuzde, 0-150). Eski satirlarda varsayilan 100 = bugunku davranis.
+    if "bg_volume" not in take_cols:
+        conn.execute("ALTER TABLE takes ADD COLUMN bg_volume INTEGER DEFAULT 100")
+
+    # Son basarili montaj zamani; eski satirlarda NULL (uyari gosterilmez).
+    if "rendered_at" not in take_cols:
+        conn.execute("ALTER TABLE takes ADD COLUMN rendered_at TEXT")
+
+    # Tek seferlik bakim: cue'su silinmis (yetim) kayitlar zaten kullanilamaz durumda
+    # (render_take kayitlari JOIN cues ile okur), diskte ve DB'de yer kapliyorlar.
+    orphans = conn.execute(
+        "SELECT id, filename FROM recordings WHERE cue_id NOT IN (SELECT id FROM cues)"
+    ).fetchall()
+    if orphans:
+        for r in orphans:
+            p = os.path.join(REC_DIR, safe_filename(r["filename"]))
+            if os.path.exists(p):
+                os.remove(p)
+        conn.execute("DELETE FROM recordings WHERE cue_id NOT IN (SELECT id FROM cues)")
+        print(f"[bakim] {len(orphans)} yetim kayit temizlendi", file=sys.stderr)
+
     conn.commit()
     conn.close()
 
 
 init_db()
-
-
-def safe_filename(name: str) -> str:
-    """Sadece dosya adını al (yol bileşenlerini at), path traversal engelle."""
-    return os.path.basename(name or "")
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +321,7 @@ def _ffmpeg_location():
     except Exception:
         return None
 
-    bin_dir = os.path.join(BASE_DIR, "bin")
+    bin_dir = BIN_DIR
     os.makedirs(bin_dir, exist_ok=True)
     dst = os.path.join(bin_dir, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
     if not os.path.exists(dst):
@@ -311,8 +343,57 @@ def _ffmpeg_bin():
     return os.path.join(loc, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 
 
+# yt-dlp/ffmpeg stderr'i TTY'ye bagliyken renk kacis kodu ("\x1b[0;31m") basar ve
+# bu kodlar istisna metnine, oradan da URL'ye ve sayfaya sizar. Her zaman temizle.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _clean_error(msg) -> str:
+    """Hata metnindeki ANSI renk kodlarini, "ERROR:" onekini ve fazla bosluklari at."""
+    text = _ANSI_RE.sub("", str(msg))
+    text = re.sub(r"^\s*ERROR:\s*", "", text)
+    return " ".join(text.split())
+
+
+# Sik gorulen yt-dlp hatalarini (kucuk harfe cevrilmis metinde aranir) kullaniciya
+# anlasilir Turkce mesaja esler. Sirali: ilk eslesen kazanir.
+_YT_ERROR_HINTS = (
+    ("not a bot", "YouTube bot dogrulamasi istiyor. Bir sure sonra tekrar deneyin veya videoyu elle indirip yukleyin."),
+    ("confirm your age", "Video yas sinirli; YouTube giris istiyor. Videoyu elle indirip yukleyin."),
+    ("age-restricted", "Video yas sinirli; YouTube giris istiyor. Videoyu elle indirip yukleyin."),
+    ("private video", "Video ozel (private); indirilemez."),
+    ("members-only", "Video sadece kanal uyelerine acik; indirilemez."),
+    ("removed by the uploader", "Video yukleyen tarafindan kaldirilmis."),
+    ("account associated with this video has been terminated", "Videonun kanali kapatilmis."),
+    ("available in your country", "Video bulundugunuz ulkede engelli (cografi kisit)."),
+    ("blocked it in your country", "Video bulundugunuz ulkede engelli (cografi kisit)."),
+    ("live event will begin", "Yayin henuz baslamamis; yayin bitince tekrar deneyin."),
+    ("live event has not started", "Yayin henuz baslamamis; yayin bitince tekrar deneyin."),
+    ("requested format is not available", "Bu video icin uygun bir 480p/mp4 format bulunamadi."),
+    ("video is unavailable", "Video YouTube'da bulunamadi (kaldirilmis olabilir ya da baglanti hatali)."),
+    ("video unavailable", "Video YouTube'da bulunamadi (kaldirilmis olabilir ya da baglanti hatali)."),
+    ("this video is not available", "YouTube videoyu vermedi. Video kaldirilmis, ozel ya da bolgesel/telif kisitli olabilir."),
+    ("unsupported url", "Bu baglanti desteklenmiyor."),
+    ("certificate verify failed", "SSL sertifika dogrulamasi basarisiz (ag/proxy sorunu)."),
+    ("urlopen error", "YouTube'a baglanilamadi; internet baglantinizi kontrol edin."),
+    ("temporary failure in name resolution", "YouTube'a baglanilamadi; internet baglantinizi kontrol edin."),
+    ("http error 429", "YouTube istekleri gecici olarak sinirladi (429). Biraz bekleyip tekrar deneyin."),
+    ("sabr", "YouTube bu videoyu indirilebilir formatta vermedi. Daha sonra tekrar deneyin."),
+)
+
+
+def _youtube_error_message(exc) -> str:
+    """yt-dlp istisnasini kullaniciya gosterilecek Turkce mesaja cevir."""
+    raw = _clean_error(exc)
+    low = raw.lower()
+    for needle, friendly in _YT_ERROR_HINTS:
+        if needle in low:
+            return friendly + " (Ayrinti: " + raw[:120] + ")"
+    return "Video indirilemedi. (Ayrinti: " + raw[:150] + ")"
+
+
 def _err(msg: str):
-    return RedirectResponse(url="/?error=" + quote(" ".join(str(msg).split())[:200]), status_code=303)
+    return RedirectResponse(url="/?error=" + quote(_clean_error(msg)[:250]), status_code=303)
 
 
 @app.post("/download")
@@ -342,6 +423,13 @@ def download_from_youtube(url: str = Form(...), title: str = Form("")):
         "quiet": True,
         "no_warnings": True,
         "retries": 2,
+        # Hata metni kullaniciya gidiyor; yt-dlp ANSI renk kodu basmasin.
+        "color": "no_color",
+        # yt-dlp'nin varsayilan istemci seti (visionos/tv/web_embedded) bazi
+        # videolarda yaniltici "This video is not available" veriyor; ayni video
+        # android/web istemcisiyle sorunsuz cozuluyor. Varsayilani basta tutup
+        # yedek istemci ekliyoruz (kaliteyi dusurmuyor, sadece yedek).
+        "extractor_args": {"youtube": {"player_client": ["default", "android", "web"]}},
     }
     ffmpeg_dir = _ffmpeg_location()
     if ffmpeg_dir:
@@ -351,7 +439,7 @@ def download_from_youtube(url: str = Form(...), title: str = Form("")):
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as exc:
-        return _err("Indirme basarisiz: " + str(exc))
+        return _err("Indirme basarisiz: " + _youtube_error_message(exc))
 
     downloaded = [f for f in os.listdir(UPLOADS_DIR) if f.startswith(token)]
     if not downloaded:
@@ -396,6 +484,29 @@ def admin_panel(request: Request, video_id: int):
     )
 
 
+def _clean_cue_fields(start_sec, end_sec, text):
+    """(start, end, text, error) dondurur; error None ise gecerli.
+
+    Kurallar ve mesajlar add_cue'nun eski gomulu dogrulamasiyla birebir aynidir.
+    (import_cues kendi dogrulamasini kullanmaya devam eder: orada hatali satir
+    atlanir, burada islem reddedilir.)
+    """
+    try:
+        start = float(start_sec)
+        end = float(end_sec)
+    except (TypeError, ValueError):
+        return None, None, (text or "").strip(), "Sayısal değer geçersiz"
+
+    clean_text = (text or "").strip()
+    if start < 0:
+        return start, end, clean_text, "Başlangıç 0 veya üstü olmalı"
+    if end <= start:
+        return start, end, clean_text, "Bitiş, başlangıçtan büyük olmalı"
+    if not clean_text:
+        return start, end, clean_text, "Metin boş olamaz"
+    return start, end, clean_text, None
+
+
 @app.post("/admin/{video_id}/cue")
 def add_cue(
     video_id: int,
@@ -403,14 +514,9 @@ def add_cue(
     end_sec: float = Form(...),
     text: str = Form(...),
 ):
-    text = (text or "").strip()
-
-    if start_sec < 0:
-        return RedirectResponse(url=f"/admin/{video_id}?error=Başlangıç 0 veya üstü olmalı", status_code=303)
-    if end_sec <= start_sec:
-        return RedirectResponse(url=f"/admin/{video_id}?error=Bitiş, başlangıçtan büyük olmalı", status_code=303)
-    if not text:
-        return RedirectResponse(url=f"/admin/{video_id}?error=Metin boş olamaz", status_code=303)
+    start_sec, end_sec, text, err = _clean_cue_fields(start_sec, end_sec, text)
+    if err:
+        return RedirectResponse(url=f"/admin/{video_id}?error={err}", status_code=303)
 
     conn = get_db()
     v = conn.execute("SELECT id FROM videos WHERE id = ?", (video_id,)).fetchone()
@@ -437,10 +543,81 @@ def delete_cue(cue_id: int):
         return RedirectResponse(url="/?error=Cue bulunamadı", status_code=303)
 
     video_id = cue["video_id"]
+
+    # Cue silinince ona bagli dublaj kayitlari yetim kalir (hicbir montaja giremez),
+    # bu yuzden delete_video desenindeki gibi once dosyalari, sonra satirlari sil.
+    recs = conn.execute("SELECT * FROM recordings WHERE cue_id = ?", (cue_id,)).fetchall()
+    for r in recs:
+        rec_path = os.path.join(REC_DIR, safe_filename(r["filename"]))
+        if os.path.exists(rec_path):
+            os.remove(rec_path)
+    conn.execute("DELETE FROM recordings WHERE cue_id = ?", (cue_id,))
+
     conn.execute("DELETE FROM cues WHERE id = ?", (cue_id,))
     conn.commit()
     conn.close()
     return RedirectResponse(url=f"/admin/{video_id}", status_code=303)
+
+
+@app.post("/api/cue/{cue_id}/update")
+def api_cue_update(
+    cue_id: int,
+    start_sec: str = Form(...),
+    end_sec: str = Form(...),
+    text: str = Form(...),
+):
+    """Var olan repligi guncelle. Cue id korunur, kayitlara DOKUNULMAZ."""
+    new_start, new_end, clean_text, err = _clean_cue_fields(start_sec, end_sec, text)
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+
+    conn = get_db()
+    cue = conn.execute("SELECT * FROM cues WHERE id = ?", (cue_id,)).fetchone()
+    if not cue:
+        conn.close()
+        return JSONResponse({"ok": False, "error": "Cue bulunamadı"}, status_code=404)
+
+    old_start = float(cue["start_sec"])
+    old_end = float(cue["end_sec"])
+    timing_changed = abs(old_start - new_start) > 1e-6 or abs(old_end - new_end) > 1e-6
+
+    affected = 0
+    warning = None
+    if timing_changed:
+        affected = conn.execute(
+            "SELECT COUNT(*) AS c FROM recordings WHERE cue_id = ?", (cue_id,)
+        ).fetchone()["c"]
+        if affected:
+            old_dur = old_end - old_start
+            new_dur = new_end - new_start
+            warning = (
+                f"Bu repliğin {affected} dublaj kaydı var; "
+                f"süre {old_dur:.1f} sn → {new_dur:.1f} sn değişti. "
+                "Kayıtlar silinmedi ama artık aralığa tam uymayabilir."
+            )
+
+    conn.execute(
+        "UPDATE cues SET start_sec = ?, end_sec = ?, text = ? WHERE id = ?",
+        (new_start, new_end, clean_text, cue_id),
+    )
+    conn.commit()
+    conn.close()
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "cue": {
+                "id": cue_id,
+                "video_id": cue["video_id"],
+                "start_sec": new_start,
+                "end_sec": new_end,
+                "text": clean_text,
+            },
+            "affected_recordings": affected,
+            "timing_changed": timing_changed,
+            "warning": warning,
+        }
+    )
 
 
 @app.post("/video/{video_id}/delete")
@@ -518,6 +695,120 @@ def api_cues(video_id: int):
         for c in cues
     ]
     return JSONResponse(result)
+
+
+def _known_duration(video) -> float:
+    """Video suresini ucuzdan pahaliya dogru bul; bulunamazsa 0.0."""
+    filename = safe_filename(video["filename"])
+    cache_path = os.path.join(WAVE_DIR, filename + ".json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                dur = float(json.load(f).get("duration") or 0.0)
+            if dur > 0:
+                return dur
+        except Exception:
+            pass  # onbellek bozuksa ffmpeg'e dus
+
+    video_path = os.path.join(UPLOADS_DIR, filename)
+    if os.path.exists(video_path):
+        return _video_duration(_ffmpeg_bin(), video_path)
+    return 0.0
+
+
+@app.post("/api/video/{video_id}/cues/shift")
+def api_cues_shift(video_id: int, offset_sec: str = Form(...), confirm: str = Form(None)):
+    """Videodaki TUM repliklerin zamanini sabit bir offset kadar kaydir.
+
+    Politika: tumu-ya-hicbiri. Sinira takilan bir kaydirma kirpilmaz, reddedilir;
+    kirpma replikler arasi goreli senkronu bozar.
+    """
+    try:
+        offset = float(offset_sec)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Sayısal değer geçersiz"}, status_code=400)
+
+    conn = get_db()
+    v = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+    if not v:
+        conn.close()
+        return JSONResponse({"ok": False, "error": "Video bulunamadı"}, status_code=404)
+
+    cues = conn.execute(
+        "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
+    ).fetchall()
+    if not cues:
+        conn.close()
+        return JSONResponse({"ok": False, "error": "Kaydırılacak replik yok"}, status_code=400)
+
+    min_start = min(float(c["start_sec"]) for c in cues)
+    max_end = max(float(c["end_sec"]) for c in cues)
+
+    if min_start + offset < -1e-6:
+        conn.close()
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"Kaydırma {-min_start:.1f} sn'den küçük olamaz: "
+                         "ilk replik 0'ın altına düşer.",
+            },
+            status_code=400,
+        )
+
+    duration = _known_duration(v)
+    if duration > 0 and max_end + offset > duration + 1e-6:
+        conn.close()
+        max_offset = duration - max_end
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"Kaydırma {max_offset:+.1f} sn'den büyük olamaz: "
+                         f"son replik video süresini ({duration:.1f} sn) aşar.",
+            },
+            status_code=400,
+        )
+
+    rec_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM recordings WHERE cue_id IN "
+        "(SELECT id FROM cues WHERE video_id = ?)",
+        (video_id,),
+    ).fetchone()["c"]
+    if rec_count > 0 and (confirm or "").strip().lower() not in ("1", "on", "true"):
+        conn.close()
+        return JSONResponse(
+            {
+                "ok": False,
+                "needs_confirm": True,
+                "recording_count": rec_count,
+                "error": f"Bu videoda {rec_count} dublaj kaydı var; "
+                         "tüm replikleri kaydırmak hepsinin senkronunu bozar.",
+            },
+            status_code=409,
+        )
+
+    # Tek ifade, atomik. Kayitlara dokunulmaz.
+    cur = conn.execute(
+        "UPDATE cues SET start_sec = start_sec + ?, end_sec = end_sec + ? WHERE video_id = ?",
+        (offset, offset, video_id),
+    )
+    updated = cur.rowcount
+    conn.commit()
+    rows = conn.execute(
+        "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
+    ).fetchall()
+    conn.close()
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "offset_sec": offset,
+            "updated": updated,
+            "cues": [
+                {"id": c["id"], "start_sec": c["start_sec"], "end_sec": c["end_sec"], "text": c["text"]}
+                for c in rows
+            ],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +1081,25 @@ def _mlx_transcribe_raw(audio_path, language=None):
     yuklenmeye calisilmaz.
     """
     import mlx_whisper
+    # mlx_whisper/audio.py sesi okumak icin PATH'ten "ffmpeg" calistirir. Proje
+    # bin/ klasoru PATH'in basinda (bkz. BIN_DIR), ama icindeki ikili tembel
+    # olusturuluyor; burada bir kez cagirarak dosyanin var oldugunu garanti et.
+    _ffmpeg_bin()
     return mlx_whisper.transcribe(audio_path, path_or_hf_repo=MLX_MODEL_REPO, language=language)
+
+
+def _engine_label(engine: str, device=None, mlx_error=None) -> str:
+    """Arayuze gidecek motor etiketi.
+
+    mlx yolundan faster-whisper'a dusulduyse bunu ETIKETTE gorunur kilar; aksi
+    halde kullanici sadece "yavas calisiyor" diye fark ediyordu.
+    """
+    label = engine
+    if device:
+        label += f" ({str(device).upper()})"
+    if mlx_error:
+        label += f" — mlx başarısız: {_clean_error(mlx_error)[:120]}"
+    return label
 
 
 def _transcribe_file(wav_path, language=None):
@@ -803,6 +1112,7 @@ def _transcribe_file(wav_path, language=None):
     kurulu degilse dogrudan mevcut faster-whisper yolu kullanilir (degismedi).
     /api/video/{id}/transcribe ucu bunu kullanir.
     """
+    mlx_error = None
     if MLX_AVAILABLE and _is_apple_silicon():
         try:
             result = _mlx_transcribe_raw(wav_path, language=language)
@@ -810,16 +1120,17 @@ def _transcribe_file(wav_path, language=None):
             detected_lang = result.get("language") or (language or "")
             return text, detected_lang, "mlx"
         except Exception as exc:
+            mlx_error = exc
             print(f"[uyari] mlx-whisper basarisiz, faster-whisper'a dusuluyor: {exc}", file=sys.stderr)
 
     if not WHISPER_AVAILABLE:
         raise RuntimeError("faster-whisper kurulu değil. Kurulum: pip install faster-whisper")
 
-    segments, info, _device = _whisper_transcribe(wav_path, language=language, vad_filter=False)
+    segments, info, device = _whisper_transcribe(wav_path, language=language, vad_filter=False)
     text = " ".join(s.text.strip() for s in segments if s.text and s.text.strip())
     text = re.sub(r"\s+", " ", text).strip()
     detected_lang = getattr(info, "language", None) or (language or "")
-    return text, detected_lang, "faster-whisper"
+    return text, detected_lang, _engine_label("faster-whisper", device, mlx_error)
 
 
 def _extract_wav_16k_mono(ffmpeg_bin, src_path, dst_path, start_sec=None, end_sec=None, timeout=300):
@@ -1011,6 +1322,8 @@ def _autocue_from_youtube(video_id: int, language: str, url: str):
             "quiet": True,
             "no_warnings": True,
             "retries": 2,
+            "color": "no_color",
+            "extractor_args": {"youtube": {"player_client": ["default", "android", "web"]}},
         }
         ffmpeg_dir = _ffmpeg_location()
         if ffmpeg_dir:
@@ -1024,7 +1337,7 @@ def _autocue_from_youtube(video_id: int, language: str, url: str):
             # Birden fazla dil istendiginde (ornegin joker ".*") bir dil basarisiz
             # olsa bile (rate limit vb.) digerleri diske yazilmis olabilir; bu yuzden
             # hemen pes etmiyoruz, asagida diskte gercekten .vtt var mi kontrol ediyoruz.
-            download_err = str(exc)
+            download_err = _youtube_error_message(exc)
 
         vtt_files = sorted(glob.glob(os.path.join(tmp, token + "*.vtt")))
         if not vtt_files:
@@ -1088,6 +1401,7 @@ def _autocue_from_whisper(video_id: int, language: str):
             return None, "Ses çıkarılamadı: " + (proc.stderr or "")[-300:]
 
         cues = None
+        mlx_error = None
         if MLX_AVAILABLE and _is_apple_silicon():
             _update_autocue_state(video_id, stage="Dinleniyor (mlx)", progress=5.0, engine="mlx", device="mlx")
             try:
@@ -1101,6 +1415,7 @@ def _autocue_from_whisper(video_id: int, language: str):
                 _update_autocue_state(video_id, stage="Dinleniyor 100%", progress=95.0)
             except Exception as exc:
                 print(f"[uyari] mlx-whisper basarisiz, faster-whisper'a dusuluyor: {exc}", file=sys.stderr)
+                mlx_error = exc
                 cues = None
 
         if cues is None:
@@ -1108,7 +1423,10 @@ def _autocue_from_whisper(video_id: int, language: str):
                 return None, "faster-whisper kurulu değil. Kurulum: pip install faster-whisper"
 
             model, device = _get_whisper()
-            _update_autocue_state(video_id, stage="Dinleniyor 0%", progress=5.0, device=device, engine="faster-whisper")
+            _update_autocue_state(
+                video_id, stage="Dinleniyor 0%", progress=5.0, device=device,
+                engine=_engine_label("faster-whisper", device, mlx_error),
+            )
 
             try:
                 seg_gen, info = model.transcribe(tmp_wav, language=whisper_lang, vad_filter=True)
@@ -1116,7 +1434,10 @@ def _autocue_from_whisper(video_id: int, language: str):
                 if device != "cuda":
                     raise
                 model, device = _get_whisper(force_cpu=True)
-                _update_autocue_state(video_id, device=device)
+                _update_autocue_state(
+                    video_id, device=device,
+                    engine=_engine_label("faster-whisper", device, mlx_error),
+                )
                 seg_gen, info = model.transcribe(tmp_wav, language=whisper_lang, vad_filter=True)
 
             total = duration if duration and duration > 0 else 1.0
@@ -1391,6 +1712,8 @@ def api_take(take_id: int):
             "output_url": f"/output/{take['output_file']}" if take["output_file"] else None,
             "error": take["error"],
             "recordings": recordings,
+            "keep_background": take["keep_background"],
+            "bg_volume": take["bg_volume"],
         }
     )
 
@@ -1403,6 +1726,17 @@ def _set_take_status(take_id: int, status: str, output_file=None, error=None):
     )
     conn.commit()
     conn.close()
+
+
+def _fail_take(take_id: int, old_output, message: str):
+    """Montaj hatasinda durumu 'error' yap ama onceki calisan ciktiyi KORU.
+
+    Aksi halde basarisiz bir yeniden montaj, kullanicinin elindeki calisan
+    videonun DB kaydini da silerdi (dosya diskte yetim kalirdi).
+    """
+    _set_take_status(take_id, "error", old_output, message)
+    if old_output:
+        print(f"[uyari] montaj basarisiz, onceki cikti korundu: {take_id}", file=sys.stderr)
 
 
 def _video_has_audio(ffmpeg_bin: str, video_path: str) -> bool:
@@ -2031,6 +2365,10 @@ def render_take(take_id: int):
         conn.close()
         return False, "Take bulunamadı"
 
+    # Yeniden montajda, islem basarisiz olursa kullanicinin elindeki calisan
+    # videonun kaybolmamasi icin onceki ciktiyi hatirla.
+    old_output = take["output_file"]
+
     video = conn.execute("SELECT * FROM videos WHERE id = ?", (take["video_id"],)).fetchone()
     if not video:
         conn.close()
@@ -2046,16 +2384,16 @@ def render_take(take_id: int):
 
     if not recordings:
         msg = "En az bir replik kaydedilmeli"
-        _set_take_status(take_id, "error", None, msg)
+        _fail_take(take_id, old_output, msg)
         return False, msg
 
     video_path = os.path.join(UPLOADS_DIR, safe_filename(video["filename"]))
     if not os.path.exists(video_path):
         msg = "Video dosyası bulunamadı"
-        _set_take_status(take_id, "error", None, msg)
+        _fail_take(take_id, old_output, msg)
         return False, msg
 
-    _set_take_status(take_id, "rendering", None, None)
+    _set_take_status(take_id, "rendering", old_output, None)
 
     ffmpeg_bin = _ffmpeg_bin()
     has_audio = _video_has_audio(ffmpeg_bin, video_path)
@@ -2091,12 +2429,17 @@ def render_take(take_id: int):
         rec_indices.append(input_index)
         input_index += 1
 
+    # Arka plan / orijinal ses kazanci (yuzde 0-150). 100 iken gain_f bos string
+    # kalir, yani uretilen filter_complex bugunkuyle birebir ayni olur (regresyon yok).
+    bg_gain = max(0, min(150, int(take["bg_volume"] if take["bg_volume"] is not None else 100))) / 100.0
+    gain_f = "" if abs(bg_gain - 1.0) < 1e-6 else f"volume={bg_gain:.3f},"
+
     aformat = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
     enable_expr = "+".join(f"between(t,{rec['start_sec']},{rec['end_sec']})" for rec in recordings)
-    filter_parts = [f"[{base_index}:a]{aformat},volume=0:enable='{enable_expr}'[base]"]
+    filter_parts = [f"[{base_index}:a]{aformat},{gain_f}volume=0:enable='{enable_expr}'[base]"]
     mix_labels = ["[base]"]
     if bg_index is not None:
-        filter_parts.append(f"[{bg_index}:a]{aformat},volume=0:enable='not({enable_expr})'[bg]")
+        filter_parts.append(f"[{bg_index}:a]{aformat},{gain_f}volume=0:enable='not({enable_expr})'[bg]")
         mix_labels.append("[bg]")
     for i, rec in enumerate(recordings, start=1):
         idx = rec_indices[i - 1]
@@ -2133,20 +2476,52 @@ def render_take(take_id: int):
 
     if proc is None:
         msg = "Montaj zaman aşımına uğradı"
-        _set_take_status(take_id, "error", None, msg)
+        _fail_take(take_id, old_output, msg)
         return False, msg
 
     if proc.returncode != 0 or not os.path.exists(output_path):
         msg = (proc.stderr or "Bilinmeyen ffmpeg hatası")[-500:]
-        _set_take_status(take_id, "error", None, msg)
+        _fail_take(take_id, old_output, msg)
         return False, msg
 
     _set_take_status(take_id, "done", output_filename, None)
+
+    conn = get_db()
+    conn.execute(
+        "UPDATE takes SET rendered_at = ? WHERE id = ?",
+        (datetime.now().isoformat(timespec="seconds"), take_id),
+    )
+    conn.commit()
+    conn.close()
+
+    # Yeniden montajda eski cikti artik hicbir yerden referans edilmiyor; diskte
+    # yetim kalmamasi icin sil.
+    if old_output and old_output != output_filename:
+        old_path = os.path.join(OUTPUTS_DIR, safe_filename(old_output))
+        if os.path.exists(old_path):
+            os.remove(old_path)
+            print(f"[bakim] eski montaj silindi: {old_output}", file=sys.stderr)
+
     return True, "ok"
 
 
+def _clean_bg_volume(raw):
+    """Form'dan gelen arka plan seviyesini 0-150 araligina kis; gecersizse None."""
+    if raw is None:
+        return None
+    try:
+        return max(0, min(150, int(float(raw))))
+    except (TypeError, ValueError):
+        return None
+
+
 @app.post("/take/{take_id}/save")
-def save_take(take_id: int, name: str = Form(...), keep_background: str = Form(None)):
+def save_take(
+    take_id: int,
+    name: str = Form(...),
+    keep_background: str = Form(None),
+    bg_volume: str = Form(None),
+):
     conn = get_db()
     take = conn.execute("SELECT * FROM takes WHERE id = ?", (take_id,)).fetchone()
     if not take:
@@ -2164,10 +2539,18 @@ def save_take(take_id: int, name: str = Form(...), keep_background: str = Form(N
 
     clean_name = (name or "").strip()[:120] or f"Dublaj {take_id}"
     keep_bg = 1 if (keep_background or "").strip().lower() in ("1", "on", "true") else 0
-    conn.execute(
-        "UPDATE takes SET name = ?, keep_background = ? WHERE id = ?",
-        (clean_name, keep_bg, take_id),
-    )
+    bg_vol = _clean_bg_volume(bg_volume)
+    if bg_vol is None:
+        # Alan gonderilmediyse (eski form) mevcut deger korunur - geriye uyumlu.
+        conn.execute(
+            "UPDATE takes SET name = ?, keep_background = ? WHERE id = ?",
+            (clean_name, keep_bg, take_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE takes SET name = ?, keep_background = ?, bg_volume = ? WHERE id = ?",
+            (clean_name, keep_bg, bg_vol, take_id),
+        )
     conn.commit()
     conn.close()
 
@@ -2176,6 +2559,47 @@ def save_take(take_id: int, name: str = Form(...), keep_background: str = Form(N
         return RedirectResponse(url=f"/take/{take_id}", status_code=303)
     return RedirectResponse(
         url=f"/dub/{video_id}?take={take_id}&error=" + quote(message[:200]), status_code=303
+    )
+
+
+@app.post("/take/{take_id}/rerender")
+def rerender_take(
+    take_id: int,
+    bg_volume: str = Form(None),
+    keep_background: str = Form(None),
+):
+    """Mevcut kayitlarla montaji yeniden calistir (ayarlar degistiyse gunceller)."""
+    conn = get_db()
+    take = conn.execute("SELECT * FROM takes WHERE id = ?", (take_id,)).fetchone()
+    if not take:
+        conn.close()
+        return RedirectResponse(url="/?error=" + quote("Take bulunamadı"), status_code=303)
+
+    rec_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM recordings WHERE take_id = ?", (take_id,)
+    ).fetchone()["c"]
+    if rec_count == 0:
+        conn.close()
+        msg = quote("En az bir replik kaydedilmeli")
+        return RedirectResponse(url=f"/take/{take_id}?error={msg}", status_code=303)
+
+    keep_bg = 1 if (keep_background or "").strip().lower() in ("1", "on", "true") else 0
+    bg_vol = _clean_bg_volume(bg_volume)
+    if bg_vol is None:
+        conn.execute("UPDATE takes SET keep_background = ? WHERE id = ?", (keep_bg, take_id))
+    else:
+        conn.execute(
+            "UPDATE takes SET keep_background = ?, bg_volume = ? WHERE id = ?",
+            (keep_bg, bg_vol, take_id),
+        )
+    conn.commit()
+    conn.close()
+
+    ok, message = render_take(take_id)
+    if ok:
+        return RedirectResponse(url=f"/take/{take_id}", status_code=303)
+    return RedirectResponse(
+        url=f"/take/{take_id}?error=" + quote(message[:200]), status_code=303
     )
 
 
@@ -2204,8 +2628,34 @@ def take_detail(request: Request, take_id: int):
     cues = conn.execute(
         "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (take["video_id"],)
     ).fetchall()
+    recs = conn.execute(
+        "SELECT cue_id, filename, created_at FROM recordings WHERE take_id = ?", (take_id,)
+    ).fetchall()
     conn.close()
-    return templates.TemplateResponse(request, "take.html", {"take": take, "video": video, "cues": cues})
+
+    recordings = {r["cue_id"]: f"/rec/{r['filename']}" for r in recs}
+
+    # Son montajdan sonra kayit eklendi/degistirildi mi? (ISO zaman damgalari,
+    # ikisi de datetime.now().isoformat(timespec="seconds") ile yazilir.)
+    # rendered_at NULL ise (bu migration'dan onceki take'ler) guvenli varsayilan:
+    # uyari gosterme.
+    recordings_changed = False
+    if recs and take["rendered_at"]:
+        last_rec = max((r["created_at"] or "") for r in recs)
+        recordings_changed = last_rec > take["rendered_at"]
+
+    return templates.TemplateResponse(
+        request,
+        "take.html",
+        {
+            "take": take,
+            "video": video,
+            "cues": cues,
+            "recordings": recordings,
+            "recordings_changed": recordings_changed,
+            "error": request.query_params.get("error"),
+        },
+    )
 
 
 @app.post("/take/{take_id}/delete")

@@ -110,7 +110,7 @@
             <h2>Dublajı Kaydet</h2>
             <form id="saveForm" action="/take/{{ take.id if take else 0 }}/save" method="post" class="form">
                 <label>İsim
-                    <input type="text" name="name" id="takeName" required>
+                    <input type="text" name="name" id="takeName" value="{{ (take.name or '') if take else '' }}" required>
                 </label>
                 <div class="checkbox-row" id="keepBgRow">
                     <label>
@@ -118,6 +118,18 @@
                         Replik aralığında arka plan sesini koru (müzik/efekt sussun istemiyorum)
                     </label>
                     <p class="muted" id="keepBgHint">Önce Admin panelden sesi ayrıştırman gerekiyor. <a href="/admin/{{ video.id }}">Admin panele git</a></p>
+                </div>
+                <div class="checkbox-row" id="bgVolumeRow">
+                    <label for="bgVolume" style="flex-direction:row;align-items:center;gap:6px">Arka plan / video sesi seviyesi: <output id="bgVolumeLabel" for="bgVolume">%100</output></label>
+                    <input type="range" name="bg_volume" id="bgVolume" min="0" max="150" step="5" value="100"
+                           aria-describedby="bgVolumeHint" style="width:230px;padding:0;accent-color:var(--acc)">
+                    <div class="actions">
+                        <button type="button" class="btn" data-bgvol="100">%100</button>
+                        <button type="button" class="btn" data-bgvol="50">%50</button>
+                        <button type="button" class="btn" data-bgvol="25">%25</button>
+                        <button type="button" class="btn" data-bgvol="0">Kapalı</button>
+                    </div>
+                    <p class="muted" id="bgVolumeHint">Arka plan sesi baskın geliyorsa seviyeyi düşür. Replik aralığındaki arka plan seviyesini duymak için “Dublajlı Dinle”yi kullan; montajda bu seviye uygulanır. “Baştan Sona Önizle” replik aralığında videoyu tamamen susturmaya devam eder.</p>
                 </div>
                 <button type="submit" id="saveBtn" disabled>Dublajı Kaydet</button>
             </form>
@@ -151,6 +163,10 @@
     const saveForm = document.getElementById('saveForm');
     const saveBtn = document.getElementById('saveBtn');
     const saveHint = document.getElementById('saveHint');
+    const keepBgCheckbox = document.getElementById('keepBgCheckbox');
+    const keepBgHint = document.getElementById('keepBgHint');
+    const bgVolume = document.getElementById('bgVolume');
+    const bgVolumeLabel = document.getElementById('bgVolumeLabel');
 
     const previewAllBtn = document.getElementById('previewAllBtn');
     const autoNextToggle = document.getElementById('autoNextToggle');
@@ -170,6 +186,17 @@
     const cueRows = Array.from(document.querySelectorAll('.cue-row'));
     const recordings = {};
 
+    // Mevcut take'in kayıtlı tercihleri (/api/take/{id} yanıtından). Take yoksa
+    // ya da alanlar henüz gelmediyse null kalır ve varsayılanlar kullanılır.
+    let takePrefs = null;
+    // Ses ayırma durumu (/api/video/{id}/separation yanıtı) — iki istek paralel
+    // gittiği için ikisi de tek bir uygulama fonksiyonunu tetikler.
+    let separationData = null;
+    // Ayrılmış arka plan (bg stem) — "Dublajlı Dinle" A/B önizlemesi için.
+    let bgUrl = null;
+    let bgAudioEl = null;
+    let bgAudioSrc = null;
+
     function cueById(cueId) {
         return cueRows.find(function (r) { return r.dataset.cueId === String(cueId); });
     }
@@ -184,9 +211,16 @@
                     recordings[cueId] = data.recordings[cueId];
                 });
             }
+            if (data && !data.error) {
+                takePrefs = {
+                    keep_background: data.keep_background,
+                    bg_volume: data.bg_volume
+                };
+            }
         } catch (err) {}
         cueRows.forEach(function (row) { renderRowStatus(row.dataset.cueId); });
         updateProgress();
+        applyTakePrefs();
     }
 
     // ---- video mute toggle (kayıt sırasında video sesi) ----
@@ -615,6 +649,8 @@
         tuHandler = null;
         videoEl.pause();
         videoEl.muted = recordMuteDefault;
+        // sahneyi dinlerken ses tam seviyeye çekilmişti; ayarlanan seviyeye dön
+        applyVideoVolume();
         const btn = document.querySelector('.btn-listen-scene[data-cue-id="' + sceneListenState.cueId + '"]');
         if (btn) { btn.textContent = '🔊 Sahneyi Dinle'; btn.classList.remove('btn-primary'); }
         sceneListenState = null;
@@ -650,6 +686,7 @@
         tuHandler = null;
         videoEl.pause();
         dubListenState.audioEl.pause();
+        if (dubListenState.bgAudio) dubListenState.bgAudio.pause();
         videoEl.muted = recordMuteDefault;
         const btn = document.querySelector('.btn-listen-dub[data-cue-id="' + dubListenState.cueId + '"]');
         if (btn) { btn.textContent = '▶ Dublajlı Dinle'; btn.classList.remove('btn-primary'); }
@@ -672,15 +709,24 @@
         const audioEl = new Audio(url);
         videoEl.muted = true;
         videoEl.currentTime = start;
+        // Montajdaki durumu birebir taklit et: arka plan korunacaksa ayrılmış
+        // bg stem'i ayarlanan seviyede, replikle birlikte çal. Pencere tek bir
+        // replik kadar kısa olduğu için duyulur kayma oluşmaz.
+        const bgAudio = (keepBgCheckbox && keepBgCheckbox.checked) ? getBgAudio() : null;
         const btn = document.querySelector('.btn-listen-dub[data-cue-id="' + cueId + '"]');
         if (btn) { btn.textContent = '⏹ Durdur'; btn.classList.add('btn-primary'); }
-        dubListenState = { cueId: cueId, audioEl: audioEl };
+        dubListenState = { cueId: cueId, audioEl: audioEl, bgAudio: bgAudio };
         tuHandler = function () {
             if (videoEl.currentTime >= end) stopDubListen();
         };
         videoEl.play().catch(function () {});
         audioEl.currentTime = 0;
         audioEl.play().catch(function () {});
+        if (bgAudio) {
+            bgAudio.volume = videoGain();
+            seekAudio(bgAudio, start);
+            bgAudio.play().catch(function () {});
+        }
     }
 
     // ---- baştan sona önizle ----
@@ -703,7 +749,9 @@
                 selectCue(cueId);
             }
         } else {
+            // replik dışı bölgeler: ayarlanan arka plan seviyesi birebir duyulur
             videoEl.muted = false;
+            applyVideoVolume();
             if (previewState) {
                 previewState.audioEl.pause();
                 previewState = null;
@@ -1092,32 +1140,133 @@
         saveBtn.textContent = 'Montajlanıyor... (birkaç saniye sürebilir)';
     });
 
-    // ---- arka planı koru seçeneği (ses ayırma durumu) ----
-    const keepBgCheckbox = document.getElementById('keepBgCheckbox');
-    const keepBgHint = document.getElementById('keepBgHint');
+    // ---- arka plan / video sesi seviyesi ----
+    // 0-150 aralığı montajda uygulanır; tarayıcı tarafında yalnızca 0-100
+    // duyurulabilir (HTMLMediaElement.volume üst sınırı 1).
+    function videoGain() {
+        if (!bgVolume) return 1;
+        const pct = parseInt(bgVolume.value, 10);
+        if (!isFinite(pct)) return 1;
+        return Math.min(1, Math.max(0, pct / 100));
+    }
 
-    function applySeparationStatus(data) {
-        if (!keepBgCheckbox) return;
-        if (data && data.status === 'done') {
-            keepBgCheckbox.disabled = false;
-            keepBgCheckbox.checked = true;
-            keepBgHint.style.display = 'none';
-        } else {
-            keepBgCheckbox.disabled = true;
-            keepBgCheckbox.checked = false;
-            keepBgHint.style.display = '';
+    function applyVideoVolume() {
+        // "Sahneyi Dinle" bilinçli olarak orijinali tam seviyede çalar
+        if (activeOp === 'sceneListen') return;
+        const gain = videoGain();
+        // aynı değeri yeniden atamak gereksiz volumechange olayı üretir
+        if (Math.abs(videoEl.volume - gain) > 0.001) {
+            try { videoEl.volume = gain; } catch (err) {}
+        }
+        if (dubListenState && dubListenState.bgAudio) {
+            dubListenState.bgAudio.volume = gain;
+        }
+    }
+
+    function updateBgVolumeLabel() {
+        if (!bgVolume || !bgVolumeLabel) return;
+        const pct = parseInt(bgVolume.value, 10);
+        bgVolumeLabel.textContent = (isFinite(pct) && pct === 0) ? 'Kapalı' : '%' + bgVolume.value;
+        bgVolume.setAttribute('aria-valuetext', bgVolumeLabel.textContent);
+    }
+
+    function setBgVolume(pct) {
+        if (!bgVolume) return;
+        bgVolume.value = String(pct);
+        updateBgVolumeLabel();
+        applyVideoVolume();
+    }
+
+    if (bgVolume) {
+        bgVolume.addEventListener('input', function () {
+            updateBgVolumeLabel();
+            applyVideoVolume();
+        });
+        document.querySelectorAll('[data-bgvol]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                setBgVolume(parseInt(btn.dataset.bgvol, 10) || 0);
+            });
+        });
+        updateBgVolumeLabel();
+    }
+
+    // ---- ayrılmış arka plan (bg stem) — "Dublajlı Dinle" A/B için ----
+    function getBgAudio() {
+        if (!bgUrl) return null;
+        if (!bgAudioEl || bgAudioSrc !== bgUrl) {
+            bgAudioEl = new Audio(bgUrl);
+            bgAudioEl.preload = 'auto';
+            bgAudioSrc = bgUrl;
+        }
+        return bgAudioEl;
+    }
+
+    function seekAudio(audio, sec) {
+        try { audio.currentTime = sec; } catch (err) {}
+        if (audio.readyState < 1) {
+            audio.addEventListener('loadedmetadata', function () {
+                try { audio.currentTime = sec; } catch (err) {}
+            }, { once: true });
+        }
+    }
+
+    // ---- arka planı koru + seviye: kayıtlı take tercihlerini geri yükle ----
+    // Take varsa onun kararı geçerlidir; yoksa ayırma hazırken varsayılan açıktır.
+    function applyTakePrefs() {
+        if (keepBgCheckbox) {
+            const ready = !!(separationData && separationData.status === 'done');
+            bgUrl = ready ? (separationData.bg_url || null) : null;
+            if (ready) {
+                const saved = takePrefs ? takePrefs.keep_background : null;
+                keepBgCheckbox.disabled = false;
+                keepBgCheckbox.checked = (saved === null || saved === undefined) ? true : !!saved;
+                keepBgHint.style.display = 'none';
+            } else {
+                keepBgCheckbox.disabled = true;
+                keepBgCheckbox.checked = false;
+                keepBgHint.style.display = '';
+            }
+        }
+        if (bgVolume) {
+            const savedVol = takePrefs ? takePrefs.bg_volume : null;
+            if (savedVol !== null && savedVol !== undefined && isFinite(savedVol)) {
+                setBgVolume(Math.min(150, Math.max(0, Math.round(savedVol))));
+            } else {
+                applyVideoVolume();
+            }
         }
     }
 
     function loadSeparationStatus() {
         fetch(`/api/video/${videoId}/separation`)
             .then(function (res) { return res.json(); })
-            .then(applySeparationStatus)
-            .catch(function () { applySeparationStatus(null); });
+            .then(function (data) { separationData = data; })
+            .catch(function () { separationData = null; })
+            .then(applyTakePrefs);
+    }
+
+    // ---- ?cue=<id> ile açılışta o repliğe odaklan ----
+    const focusCueId = new URLSearchParams(location.search).get('cue');
+    function applyFocusCue() {
+        if (!focusCueId) return;
+        const row = cueById(focusCueId);
+        if (!row) return;
+        selectCue(row.dataset.cueId);
+        const start = parseFloat(row.dataset.start);
+        if (isFinite(start)) {
+            const seek = function () {
+                videoEl.currentTime = start;
+                updatePlayheadPosition();
+            };
+            if (videoEl.readyState >= 1) seek();
+            else videoEl.addEventListener('loadedmetadata', seek, { once: true });
+        }
+        row.scrollIntoView({ block: 'center' });
+        row.classList.add('row-highlight');
     }
 
     initMic();
-    hydrateRecordings();
+    hydrateRecordings().then(applyFocusCue);
     loadWaveform();
     loadSeparationStatus();
 })();
