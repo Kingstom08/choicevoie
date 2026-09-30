@@ -32,6 +32,8 @@ video{width:100%;max-width:720px;background:#000;border-radius:8px;display:block
 .cue-row{cursor:pointer}
 .cue-row:hover{background:#242932}
 .cue-table audio{height:30px;max-width:220px}
+.cue-vol{width:66px;background:#12141a;border:1px solid var(--line);color:var(--fg);border-radius:5px;padding:4px 6px;font:inherit;font-size:13px}
+.cue-vol:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
 .admin-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
 .admin-video,.admin-panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
 @media(max-width:900px){.admin-layout{grid-template-columns:1fr}}
@@ -46,6 +48,20 @@ video{width:100%;max-width:720px;background:#000;border-radius:8px;display:block
 .dub-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:18px;align-items:start}
 @media(max-width:900px){.dub-layout{grid-template-columns:1fr}}
 .subtitle-box-lg{font-size:26px;min-height:80px}
+
+/* --- dub sayfası: video/mikrofon paneli, replik listesi kaydırılırken
+   görünürde kalsın. Replik tablosu uzun olabildiği için sağ kolon normal
+   akışta kayar, sol kolon (video + canlı mikrofon paneli) sticky ile
+   ekranda sabit tutulur. İçerik viewport'tan uzun olursa kendi içinde
+   kaydırılır (max-height + overflow-y), böylece alttaki mikrofon cihaz
+   seçici kaybolmaz. */
+.dub-video-col{position:sticky;top:20px;max-height:calc(100vh - 40px);overflow-y:auto;background:var(--bg);z-index:2}
+@media(max-width:900px){
+    /* Dar ekranda video+mikrofon paneli viewport'un çoğunu kaplar; sticky
+       burada kullanışsız olur, normal akışa dön (mevcut .dub-layout
+       breakpoint'iyle aynı sınır). */
+    .dub-video-col{position:static;max-height:none;overflow-y:visible}
+}
 
 /* --- live waveform / recording --- */
 .wave-box{position:relative;margin-top:12px;border:2px solid var(--line);border-radius:8px;overflow:hidden;background:#0e1014}

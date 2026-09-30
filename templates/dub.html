@@ -211,7 +211,7 @@
                     recordings[cueId] = data.recordings[cueId];
                 });
             }
-            if (data && !data.error) {
+            if (res.ok && data) {
                 takePrefs = {
                     keep_background: data.keep_background,
                     bg_volume: data.bg_volume
@@ -310,19 +310,70 @@
         } catch (err) {}
     }
 
+    // Mikrofon bağlantısı beklenmedik şekilde kesilirse (ör. macOS Continuity/iPhone
+    // mikrofonu geçici olarak düşerse) burada tek bir yerden Türkçe, nedene göre
+    // ayrılmış bir mesaj üretiyoruz.
+    function micErrorMessage(err) {
+        const name = err && err.name;
+        if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+            return 'Mikrofon izni reddedildi. Tarayıcı ayarlarından mikrofon iznini kontrol et.';
+        }
+        if (name === 'NotReadableError' || name === 'TrackStartError') {
+            return 'Mikrofona ulaşılamıyor (cihaz meşgul ya da bağlantısı kopmuş olabilir). Cihazı kontrol edip tekrar dene.';
+        }
+        if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+            return 'Seçili mikrofonun bağlantısı kopmuş görünüyor. Başka bir mikrofon seçmeyi ya da tekrar bağlanmasını beklemeyi dene.';
+        }
+        return 'Mikrofon izni reddedildi ya da kullanılamıyor. Tarayıcı ayarlarından mikrofon iznini kontrol et.';
+    }
+
+    let micRecovering = false;
+    function attemptMicRecovery() {
+        if (micRecovering) return;
+        micRecovering = true;
+        setTimeout(function () {
+            micRecovering = false;
+            initMic(micDeviceSelect ? micDeviceSelect.value : undefined);
+        }, 1200);
+    }
+
+    // Kayıt cihazının (ör. iPhone Continuity mikrofonu) bağlantısı sinyal düzeyinde
+    // kesilirse tarayıcı bunu track üzerinde 'mute'/'ended' olayıyla bildirir.
+    // Bunları dinlemezsek kullanıcı sessiz kayıt alır ve uygulama hiç fark etmez.
+    function attachTrackWatchers(stream) {
+        stream.getAudioTracks().forEach(function (track) {
+            track.onended = function () {
+                micStatus.textContent = 'Mikrofon bağlantısı kesildi (cihaz ayrıldı ya da kapandı). Yeniden bağlanmaya çalışılıyor...';
+                attemptMicRecovery();
+            };
+            track.onmute = function () {
+                micStatus.textContent = 'Mikrofon sinyali kesildi (bağlantı sorunu). Yeniden bağlanmaya çalışılıyor...';
+                attemptMicRecovery();
+            };
+            track.onunmute = function () {
+                micStatus.textContent = 'Mikrofon hazır.';
+            };
+        });
+    }
+
     async function initMic(deviceId) {
         if (mediaStream) {
             mediaStream.getTracks().forEach(function (t) { t.stop(); });
             mediaStream = null;
         }
         try {
-            const constraints = deviceId ? { audio: { deviceId: { exact: deviceId } } } : { audio: true };
+            // 'exact' kısıtı, seçili cihaz (ör. iPhone Continuity mikrofonu) geçici
+            // olarak düşüp geri geldiğinde OverconstrainedError fırlatarak yeniden
+            // bağlanmayı tamamen imkansız kılıyordu. 'ideal' aynı cihazı tercih eder
+            // ama bulunamazsa varsayılana düşerek bağlantının kurtarılmasına izin verir.
+            const constraints = deviceId ? { audio: { deviceId: { ideal: deviceId } } } : { audio: true };
             mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
         } catch (err) {
-            micStatus.textContent = 'Mikrofon izni reddedildi ya da kullanılamıyor. Tarayıcı ayarlarından mikrofon iznini kontrol et.';
+            micStatus.textContent = micErrorMessage(err);
             return;
         }
         micStatus.textContent = 'Mikrofon hazır.';
+        attachTrackWatchers(mediaStream);
         waveBox.style.display = '';
         if (sourceNode) { try { sourceNode.disconnect(); } catch (e) {} }
         if (!audioCtx) {
@@ -348,7 +399,15 @@
         });
     }
     if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
-        navigator.mediaDevices.addEventListener('devicechange', refreshDeviceList);
+        navigator.mediaDevices.addEventListener('devicechange', function () {
+            refreshDeviceList();
+            // Cihaz listesi değiştiğinde mevcut akışın track'i hâlâ canlı mı diye
+            // kontrol ediyoruz; ölmüşse (ör. iPhone mikrofonu düşmüşse) otomatik
+            // olarak yeniden bağlanmayı dene.
+            const tracks = mediaStream ? mediaStream.getAudioTracks() : [];
+            const dead = !tracks.length || tracks.some(function (t) { return t.readyState === 'ended'; });
+            if (dead) attemptMicRecovery();
+        });
     }
 
     // ---- videonun zaman eksenli ses şeridi ----
@@ -649,12 +708,13 @@
         tuHandler = null;
         videoEl.pause();
         videoEl.muted = recordMuteDefault;
-        // sahneyi dinlerken ses tam seviyeye çekilmişti; ayarlanan seviyeye dön
-        applyVideoVolume();
         const btn = document.querySelector('.btn-listen-scene[data-cue-id="' + sceneListenState.cueId + '"]');
         if (btn) { btn.textContent = '🔊 Sahneyi Dinle'; btn.classList.remove('btn-primary'); }
         sceneListenState = null;
         activeOp = null;
+        // sahneyi dinlerken ses tam seviyeye çekilmişti; ayarlanan seviyeye dön
+        // (activeOp artık 'sceneListen' olmadığı için erken return etmez)
+        applyVideoVolume();
     }
 
     function listenScene(cueId) {

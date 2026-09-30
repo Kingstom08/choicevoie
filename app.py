@@ -4,6 +4,7 @@ import glob
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import re
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime
 from urllib.parse import urlparse, quote
@@ -23,6 +25,7 @@ from fastapi.responses import RedirectResponse, FileResponse, JSONResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 try:
     # Windows sertifika deposunu Python'a tanit (yt-dlp SSL dogrulamasi icin)
@@ -235,6 +238,28 @@ def init_db():
     if "rendered_at" not in take_cols:
         conn.execute("ALTER TABLE takes ADD COLUMN rendered_at TEXT")
 
+    # Son basarili montajda kullanilan kayit sayisi. rendered_at ile birlikte
+    # "kayitlar degisti mi?" uyarisinda kayit SILME durumunu da yakalamak icin
+    # (zaman damgasi karsilastirmasi tek basina azalan sayimi goremez).
+    # Eski satirlarda NULL -> eski (zaman damgasi tabanli) davranisa duser.
+    if "rendered_rec_count" not in take_cols:
+        conn.execute("ALTER TABLE takes ADD COLUMN rendered_rec_count INTEGER")
+
+    # Dublaj kayitlarinin master seviyesi (yuzde 0-200). Eski satirlar 100 = bugunku davranis.
+    if "dub_volume" not in take_cols:
+        conn.execute("ALTER TABLE takes ADD COLUMN dub_volume INTEGER DEFAULT 100")
+    # Kayit seviyelerini otomatik esitle (0/1). Varsayilan kapali = davranis degismez.
+    if "auto_level" not in take_cols:
+        conn.execute("ALTER TABLE takes ADD COLUMN auto_level INTEGER DEFAULT 0")
+
+    rec_cols = [r["name"] for r in conn.execute("PRAGMA table_info(recordings)").fetchall()]
+    if "volume" not in rec_cols:
+        conn.execute("ALTER TABLE recordings ADD COLUMN volume INTEGER DEFAULT 100")
+    if "mean_db" not in rec_cols:
+        conn.execute("ALTER TABLE recordings ADD COLUMN mean_db REAL")
+    if "peak_db" not in rec_cols:
+        conn.execute("ALTER TABLE recordings ADD COLUMN peak_db REAL")
+
     # Tek seferlik bakim: cue'su silinmis (yetim) kayitlar zaten kullanilamaz durumda
     # (render_take kayitlari JOIN cues ile okur), diskte ve DB'de yer kapliyorlar.
     orphans = conn.execute(
@@ -378,7 +403,7 @@ _YT_ERROR_HINTS = (
     ("urlopen error", "YouTube'a baglanilamadi; internet baglantinizi kontrol edin."),
     ("temporary failure in name resolution", "YouTube'a baglanilamadi; internet baglantinizi kontrol edin."),
     ("http error 429", "YouTube istekleri gecici olarak sinirladi (429). Biraz bekleyip tekrar deneyin."),
-    ("sabr", "YouTube bu videoyu indirilebilir formatta vermedi. Daha sonra tekrar deneyin."),
+    ("sabr streaming", "YouTube bu videoyu indirilebilir formatta vermedi. Daha sonra tekrar deneyin."),
 )
 
 
@@ -484,6 +509,11 @@ def admin_panel(request: Request, video_id: int):
     )
 
 
+# Cue sinirlarinda makul bir ust sinir: gercekci hicbir video 24 saati asmaz.
+# inf/nan disinda, asiri buyuk sayisal degerleri de erkenden reddeder.
+_MAX_CUE_SEC = 24 * 3600
+
+
 def _clean_cue_fields(start_sec, end_sec, text):
     """(start, end, text, error) dondurur; error None ise gecerli.
 
@@ -495,6 +525,15 @@ def _clean_cue_fields(start_sec, end_sec, text):
         start = float(start_sec)
         end = float(end_sec)
     except (TypeError, ValueError):
+        return None, None, (text or "").strip(), "Sayısal değer geçersiz"
+
+    # inf/nan hicbir karsilastirmaya (start < 0, end <= start) takilmadan
+    # gecerlilikten gecebilir (NaN karsilastirmalari hep False dondurur, inf
+    # hicbir sinira carpmaz) ve DB'ye yazilip montajda cozulmemis OverflowError'a
+    # ya da sessiz sonsuz susturmaya yol acar. Erken reddet.
+    if not (math.isfinite(start) and math.isfinite(end)):
+        return None, None, (text or "").strip(), "Sayısal değer geçersiz"
+    if start > _MAX_CUE_SEC or end > _MAX_CUE_SEC:
         return None, None, (text or "").strip(), "Sayısal değer geçersiz"
 
     clean_text = (text or "").strip()
@@ -537,25 +576,26 @@ def add_cue(
 @app.post("/cue/{cue_id}/delete")
 def delete_cue(cue_id: int):
     conn = get_db()
-    cue = conn.execute("SELECT * FROM cues WHERE id = ?", (cue_id,)).fetchone()
-    if not cue:
+    try:
+        cue = conn.execute("SELECT * FROM cues WHERE id = ?", (cue_id,)).fetchone()
+        if not cue:
+            return RedirectResponse(url="/?error=Cue bulunamadı", status_code=303)
+
+        video_id = cue["video_id"]
+
+        # Cue silinince ona bagli dublaj kayitlari yetim kalir (hicbir montaja giremez),
+        # bu yuzden delete_video desenindeki gibi once dosyalari, sonra satirlari sil.
+        recs = conn.execute("SELECT * FROM recordings WHERE cue_id = ?", (cue_id,)).fetchall()
+        for r in recs:
+            rec_path = os.path.join(REC_DIR, safe_filename(r["filename"]))
+            if os.path.exists(rec_path):
+                os.remove(rec_path)
+        conn.execute("DELETE FROM recordings WHERE cue_id = ?", (cue_id,))
+
+        conn.execute("DELETE FROM cues WHERE id = ?", (cue_id,))
+        conn.commit()
+    finally:
         conn.close()
-        return RedirectResponse(url="/?error=Cue bulunamadı", status_code=303)
-
-    video_id = cue["video_id"]
-
-    # Cue silinince ona bagli dublaj kayitlari yetim kalir (hicbir montaja giremez),
-    # bu yuzden delete_video desenindeki gibi once dosyalari, sonra satirlari sil.
-    recs = conn.execute("SELECT * FROM recordings WHERE cue_id = ?", (cue_id,)).fetchall()
-    for r in recs:
-        rec_path = os.path.join(REC_DIR, safe_filename(r["filename"]))
-        if os.path.exists(rec_path):
-            os.remove(rec_path)
-    conn.execute("DELETE FROM recordings WHERE cue_id = ?", (cue_id,))
-
-    conn.execute("DELETE FROM cues WHERE id = ?", (cue_id,))
-    conn.commit()
-    conn.close()
     return RedirectResponse(url=f"/admin/{video_id}", status_code=303)
 
 
@@ -572,36 +612,50 @@ def api_cue_update(
         return JSONResponse({"ok": False, "error": err}, status_code=400)
 
     conn = get_db()
-    cue = conn.execute("SELECT * FROM cues WHERE id = ?", (cue_id,)).fetchone()
-    if not cue:
-        conn.close()
-        return JSONResponse({"ok": False, "error": "Cue bulunamadı"}, status_code=404)
+    try:
+        cue = conn.execute("SELECT * FROM cues WHERE id = ?", (cue_id,)).fetchone()
+        if not cue:
+            return JSONResponse({"ok": False, "error": "Cue bulunamadı"}, status_code=404)
 
-    old_start = float(cue["start_sec"])
-    old_end = float(cue["end_sec"])
-    timing_changed = abs(old_start - new_start) > 1e-6 or abs(old_end - new_end) > 1e-6
-
-    affected = 0
-    warning = None
-    if timing_changed:
-        affected = conn.execute(
-            "SELECT COUNT(*) AS c FROM recordings WHERE cue_id = ?", (cue_id,)
-        ).fetchone()["c"]
-        if affected:
-            old_dur = old_end - old_start
-            new_dur = new_end - new_start
-            warning = (
-                f"Bu repliğin {affected} dublaj kaydı var; "
-                f"süre {old_dur:.1f} sn → {new_dur:.1f} sn değişti. "
-                "Kayıtlar silinmedi ama artık aralığa tam uymayabilir."
+        # Shift ucundaki ayni politika: bitis, video suresini asamaz (tumu-ya-hic,
+        # kirpma yok). Sinir bilinmiyorsa (video dosyasi/onbellek yok) kontrol atlanir.
+        video = conn.execute("SELECT * FROM videos WHERE id = ?", (cue["video_id"],)).fetchone()
+        duration = _known_duration(video) if video else 0.0
+        if duration > 0 and new_end > duration + 1e-6:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Bitiş {new_end:.1f} sn, video süresini ({duration:.1f} sn) aşamaz.",
+                },
+                status_code=400,
             )
 
-    conn.execute(
-        "UPDATE cues SET start_sec = ?, end_sec = ?, text = ? WHERE id = ?",
-        (new_start, new_end, clean_text, cue_id),
-    )
-    conn.commit()
-    conn.close()
+        old_start = float(cue["start_sec"])
+        old_end = float(cue["end_sec"])
+        timing_changed = abs(old_start - new_start) > 1e-6 or abs(old_end - new_end) > 1e-6
+
+        affected = 0
+        warning = None
+        if timing_changed:
+            affected = conn.execute(
+                "SELECT COUNT(*) AS c FROM recordings WHERE cue_id = ?", (cue_id,)
+            ).fetchone()["c"]
+            if affected:
+                old_dur = old_end - old_start
+                new_dur = new_end - new_start
+                warning = (
+                    f"Bu repliğin {affected} dublaj kaydı var; "
+                    f"süre {old_dur:.1f} sn → {new_dur:.1f} sn değişti. "
+                    "Kayıtlar silinmedi ama artık aralığa tam uymayabilir."
+                )
+
+        conn.execute(
+            "UPDATE cues SET start_sec = ?, end_sec = ?, text = ? WHERE id = ?",
+            (new_start, new_end, clean_text, cue_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
     return JSONResponse(
         {
@@ -728,75 +782,78 @@ def api_cues_shift(video_id: int, offset_sec: str = Form(...), confirm: str = Fo
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Sayısal değer geçersiz"}, status_code=400)
 
+    # inf/nan hicbir sinir kontrolune (asagidaki min/max karsilastirmalari) takilmayabilir
+    # (ozellikle _known_duration() video dosyasi yokken 0 donunce ust sinir atlanir) ve
+    # tum repliklerin start/end'i inf'e kayar. Erken reddet.
+    if not math.isfinite(offset):
+        return JSONResponse({"ok": False, "error": "Sayısal değer geçersiz"}, status_code=400)
+
     conn = get_db()
-    v = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
-    if not v:
-        conn.close()
-        return JSONResponse({"ok": False, "error": "Video bulunamadı"}, status_code=404)
+    try:
+        v = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        if not v:
+            return JSONResponse({"ok": False, "error": "Video bulunamadı"}, status_code=404)
 
-    cues = conn.execute(
-        "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
-    ).fetchall()
-    if not cues:
-        conn.close()
-        return JSONResponse({"ok": False, "error": "Kaydırılacak replik yok"}, status_code=400)
+        cues = conn.execute(
+            "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
+        ).fetchall()
+        if not cues:
+            return JSONResponse({"ok": False, "error": "Kaydırılacak replik yok"}, status_code=400)
 
-    min_start = min(float(c["start_sec"]) for c in cues)
-    max_end = max(float(c["end_sec"]) for c in cues)
+        min_start = min(float(c["start_sec"]) for c in cues)
+        max_end = max(float(c["end_sec"]) for c in cues)
 
-    if min_start + offset < -1e-6:
-        conn.close()
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": f"Kaydırma {-min_start:.1f} sn'den küçük olamaz: "
-                         "ilk replik 0'ın altına düşer.",
-            },
-            status_code=400,
+        if min_start + offset < -1e-6:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Kaydırma {-min_start:.1f} sn'den küçük olamaz: "
+                             "ilk replik 0'ın altına düşer.",
+                },
+                status_code=400,
+            )
+
+        duration = _known_duration(v)
+        if duration > 0 and max_end + offset > duration + 1e-6:
+            max_offset = duration - max_end
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": f"Kaydırma {max_offset:+.1f} sn'den büyük olamaz: "
+                             f"son replik video süresini ({duration:.1f} sn) aşar.",
+                },
+                status_code=400,
+            )
+
+        rec_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM recordings WHERE cue_id IN "
+            "(SELECT id FROM cues WHERE video_id = ?)",
+            (video_id,),
+        ).fetchone()["c"]
+        if rec_count > 0 and (confirm or "").strip().lower() not in ("1", "on", "true"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "needs_confirm": True,
+                    "recording_count": rec_count,
+                    "error": f"Bu videoda {rec_count} dublaj kaydı var; "
+                             "tüm replikleri kaydırmak hepsinin senkronunu bozar.",
+                },
+                status_code=409,
+            )
+
+        # Tek ifade, atomik. Kayitlara dokunulmaz.
+        cur = conn.execute(
+            "UPDATE cues SET start_sec = start_sec + ?, end_sec = end_sec + ? WHERE video_id = ?",
+            (offset, offset, video_id),
         )
-
-    duration = _known_duration(v)
-    if duration > 0 and max_end + offset > duration + 1e-6:
+        updated = cur.rowcount
+        conn.commit()
+        rows = conn.execute(
+            "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
+        ).fetchall()
+    finally:
         conn.close()
-        max_offset = duration - max_end
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": f"Kaydırma {max_offset:+.1f} sn'den büyük olamaz: "
-                         f"son replik video süresini ({duration:.1f} sn) aşar.",
-            },
-            status_code=400,
-        )
-
-    rec_count = conn.execute(
-        "SELECT COUNT(*) AS c FROM recordings WHERE cue_id IN "
-        "(SELECT id FROM cues WHERE video_id = ?)",
-        (video_id,),
-    ).fetchone()["c"]
-    if rec_count > 0 and (confirm or "").strip().lower() not in ("1", "on", "true"):
-        conn.close()
-        return JSONResponse(
-            {
-                "ok": False,
-                "needs_confirm": True,
-                "recording_count": rec_count,
-                "error": f"Bu videoda {rec_count} dublaj kaydı var; "
-                         "tüm replikleri kaydırmak hepsinin senkronunu bozar.",
-            },
-            status_code=409,
-        )
-
-    # Tek ifade, atomik. Kayitlara dokunulmaz.
-    cur = conn.execute(
-        "UPDATE cues SET start_sec = start_sec + ?, end_sec = end_sec + ? WHERE video_id = ?",
-        (offset, offset, video_id),
-    )
-    updated = cur.rowcount
-    conn.commit()
-    rows = conn.execute(
-        "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (video_id,)
-    ).fetchall()
-    conn.close()
 
     return JSONResponse(
         {
@@ -969,6 +1026,12 @@ async def import_cues(video_id: int, file: UploadFile = File(...), mode: str = F
             start = float(start)
             end = float(end)
         except (TypeError, ValueError):
+            continue
+        # inf/nan disaridan gelen dosyada da ayni riski tasir (bkz. _clean_cue_fields);
+        # burada semantik "atla" oldugu icin reddetmek yerine sadece satiri gec.
+        if not (math.isfinite(start) and math.isfinite(end)):
+            continue
+        if start > _MAX_CUE_SEC or end > _MAX_CUE_SEC:
             continue
         text = (text or "").strip()
         if not text or start < 0 or end <= start:
@@ -1487,11 +1550,37 @@ def _run_autocue_job(video_id: int, source: str, mode: str, language: str, url: 
         cues = cues[:500]
         note = " (500 sınırı nedeniyle ilk 500 replik alındı)"
 
+    # inf/nan disinda, asiri buyuk degerler de erkenden reddedilir (bkz. _MAX_CUE_SEC
+    # yorumu ve import_cues'daki ayni kontrol). Whisper/YouTube kaynagi teorik olarak
+    # boyle bir deger uretmemeli ama F1'in "tum yazma yollarini kapat" hedefi geregi
+    # burada da dogrulaniyor. import_cues'daki "atla, reddetme" semantigi kullanilir:
+    # gecersiz tek bir segment yuzunden toplu uretimin tamami cope atilmaz.
+    clean_cues = []
+    skipped = 0
+    for start, end, text in cues:
+        text = (text or "").strip()
+        if not (math.isfinite(start) and math.isfinite(end)):
+            skipped += 1
+            continue
+        if start > _MAX_CUE_SEC or end > _MAX_CUE_SEC:
+            skipped += 1
+            continue
+        if not text or start < 0 or end <= start:
+            skipped += 1
+            continue
+        clean_cues.append((start, end, text))
+
+    if skipped:
+        print(
+            f"[uyari] oto-cue: {skipped} gecersiz segment atlandi (video_id={video_id})",
+            file=sys.stderr,
+        )
+
     conn = get_db()
     try:
         if mode == "replace":
             conn.execute("DELETE FROM cues WHERE video_id = ?", (video_id,))
-        for start, end, text in cues:
+        for start, end, text in clean_cues:
             conn.execute(
                 "INSERT INTO cues (video_id, start_sec, end_sec, text) VALUES (?, ?, ?, ?)",
                 (video_id, start, end, text),
@@ -1502,7 +1591,7 @@ def _run_autocue_job(video_id: int, source: str, mode: str, language: str, url: 
 
     _update_autocue_state(
         video_id, status="done", progress=100.0, stage="Tamamlandı",
-        message="ok" + note, added=len(cues),
+        message="ok" + note, added=len(clean_cues),
     )
 
 
@@ -1660,8 +1749,11 @@ async def upload_recording(take_id: int, cue_id: int, audio: UploadFile = File(.
         old_path = os.path.join(REC_DIR, safe_filename(existing["filename"]))
         if os.path.exists(old_path):
             os.remove(old_path)
+        # mean_db/peak_db sifirlanir: eski olcum yeni sesle artik gecersiz, bir
+        # sonraki auto_level render'i yeniden olcecek. volume (kullanicinin bu
+        # replik icin verdigi bilincli seviye tercihi) KORUNUR, sifirlanmaz.
         conn.execute(
-            "UPDATE recordings SET filename = ?, created_at = ? WHERE id = ?",
+            "UPDATE recordings SET filename = ?, created_at = ?, mean_db = NULL, peak_db = NULL WHERE id = ?",
             (new_filename, now, existing["id"]),
         )
     else:
@@ -1702,6 +1794,10 @@ def api_take(take_id: int):
     ).fetchall()
     conn.close()
 
+    # DIKKAT: burada cue_id STR anahtar olarak kullanilir (dub.html:209-212 buna
+    # bagimli, JSON.parse sonrasi tum obje anahtarlari string olur). take_detail()
+    # ayni sozlugu INT anahtarla uretir (take.html:65 buna bagimli) - kasitli
+    # fark, DEGISTIRME: ikisini de kirarsin.
     recordings = {str(r["cue_id"]): f"/rec/{r['filename']}" for r in recs}
     return JSONResponse(
         {
@@ -1714,6 +1810,8 @@ def api_take(take_id: int):
             "recordings": recordings,
             "keep_background": take["keep_background"],
             "bg_volume": take["bg_volume"],
+            "dub_volume": take["dub_volume"],
+            "auto_level": take["auto_level"],
         }
     )
 
@@ -1766,6 +1864,96 @@ def _parse_duration(stderr_text: str) -> float:
         return 0.0
     h, mi, s = m.groups()
     return int(h) * 3600 + int(mi) * 60 + float(s)
+
+
+# ---------------------------------------------------------------------------
+# Kayit seviyesi olcumu + otomatik esitleme ("bazen az bazen fazla" varyansini
+# gidermek icin). Master (dub_volume) ve kayit-basi manuel (recordings.volume)
+# ile ayni carpimsal zincirde birlesir; bkz. render_take() gain enjeksiyonu.
+# ---------------------------------------------------------------------------
+AUTO_TARGET_DB = -20.0  # konusma icin tipik RMS hedefi
+AUTO_MAX_BOOST_DB = 15.0
+AUTO_MAX_CUT_DB = -6.0
+AUTO_PEAK_CEIL_DB = -1.0
+AUTO_SILENCE_FLOOR_DB = -45.0
+
+
+def _measure_rec_level(ffmpeg_bin, path):
+    """(mean_db, peak_db) dondur; olculemezse (None, None).
+
+    silenceremove zorunlu: volumedetect ortalamayi tum dosya uzerinden alir,
+    kayitta "hazirlik payi" sessizligi var, bu ortalamayi dusurur ve sessizligi
+    cok olan klipler sistematik olarak fazla yukseltilir.
+    """
+    cmd = [ffmpeg_bin, "-hide_banner", "-nostdin", "-i", path,
+           "-af", "silenceremove=start_periods=1:start_threshold=-50dB:"
+                  "stop_periods=-1:stop_threshold=-50dB:stop_duration=0.2,volumedetect",
+           "-f", "null", "-"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
+    except Exception:
+        return None, None
+    err = p.stderr or ""
+    m = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", err)
+    x = re.search(r"max_volume:\s*(-?\d+(?:\.\d+)?) dB", err)
+    return (float(m.group(1)) if m else None), (float(x.group(1)) if x else None)
+
+
+def _auto_gain_from(mean_db, peak_db) -> float:
+    if mean_db is None or mean_db <= AUTO_SILENCE_FLOOR_DB:
+        return 1.0
+    g_db = max(AUTO_MAX_CUT_DB, min(AUTO_MAX_BOOST_DB, AUTO_TARGET_DB - mean_db))
+    if peak_db is not None:
+        g_db = min(g_db, AUTO_PEAK_CEIL_DB - peak_db)
+    return 10.0 ** (g_db / 20.0)
+
+
+def _auto_level_gains(ffmpeg_bin: str, recordings) -> list:
+    """auto_level=1 iken her kayit icin otomatik kazanc (linear) hesapla.
+
+    mean_db NULL olan kayitlar (hic olculmemis veya yeniden kayittan sonra
+    sifirlanmis) olculur ve sonuc kendi kisa DB baglantisiyla yazilir
+    (render_take'in conn'u bu noktada zaten kapali). mean_db zaten dolu olan
+    kayitlar tekrar olculmez: auto_level kapaliyken maliyet 0, ilk auto
+    render'da kayit basina ~30-60ms, sonraki render'larda 0ms.
+    """
+    gains = []
+    conn = None
+    for rec in recordings:
+        mean_db = rec["rec_mean_db"]
+        peak_db = rec["rec_peak_db"]
+        if mean_db is None:
+            path = os.path.join(REC_DIR, safe_filename(rec["rec_filename"]))
+            mean_db, peak_db = _measure_rec_level(ffmpeg_bin, path)
+            if conn is None:
+                conn = get_db()
+            conn.execute(
+                "UPDATE recordings SET mean_db = ?, peak_db = ? WHERE id = ?",
+                (mean_db, peak_db, rec["rec_id"]),
+            )
+            if mean_db is None:
+                print(f"[seviye] olcum basarisiz rec={rec['rec_id']} (gain=1.0)", file=sys.stderr)
+            else:
+                g = _auto_gain_from(mean_db, peak_db)
+                g_db = 20.0 * math.log10(g) if g > 0 else 0.0
+                pk_display = peak_db if peak_db is not None else float("nan")
+                print(
+                    f"[seviye] rec={rec['rec_id']} mean={mean_db:.1f}dB "
+                    f"peak={pk_display:.1f}dB gain={g_db:+.1f}dB",
+                    file=sys.stderr,
+                )
+        gains.append(_auto_gain_from(mean_db, peak_db))
+    if conn is not None:
+        conn.commit()
+        conn.close()
+    return gains
+
+
+def _effective_dub_gain(dub_master: float, rec, auto_gains, idx: int) -> float:
+    """Uc katmanli carpimsal kazanc: master x kayit-basi manuel x otomatik."""
+    rec_vol = max(0, min(200, int(rec["rec_volume"] if rec["rec_volume"] is not None else 100))) / 100.0
+    auto_g = auto_gains[idx] if auto_gains is not None else 1.0
+    return dub_master * rec_vol * auto_g
 
 
 def _compute_waveform(ffmpeg_bin: str, video_path: str) -> dict:
@@ -1871,6 +2059,28 @@ def api_waveform(video_id: int):
 
 def _demucs_available() -> bool:
     return importlib.util.find_spec("demucs") is not None
+
+
+_ALIMITER_CACHE = None
+
+
+def _has_alimiter(ffmpeg_bin: str) -> bool:
+    """Bu ffmpeg build'inde alimiter filtresi var mi? Modul seviyesinde onbelleklenir.
+
+    Zorunlu probe: alimiter'i olmayan bir build'de her iki render denemesi de
+    (-c:v copy ve libx264 fallback) filter hatasiyla duserdi.
+    """
+    global _ALIMITER_CACHE
+    if _ALIMITER_CACHE is None:
+        try:
+            p = subprocess.run(
+                [ffmpeg_bin, "-hide_banner", "-filters"],
+                capture_output=True, text=True, errors="replace", timeout=20,
+            )
+            _ALIMITER_CACHE = " alimiter " in (p.stdout or "")
+        except Exception:
+            _ALIMITER_CACHE = False
+    return _ALIMITER_CACHE
 
 
 def _torch_device() -> str:
@@ -2375,7 +2585,9 @@ def render_take(take_id: int):
         return False, "Video bulunamadı"
 
     recordings = conn.execute(
-        """SELECT r.filename AS rec_filename, c.start_sec, c.end_sec
+        """SELECT r.id AS rec_id, r.filename AS rec_filename, r.volume AS rec_volume,
+                  r.mean_db AS rec_mean_db, r.peak_db AS rec_peak_db,
+                  c.start_sec, c.end_sec
            FROM recordings r JOIN cues c ON c.id = r.cue_id
            WHERE r.take_id = ? ORDER BY c.start_sec ASC""",
         (take_id,),
@@ -2393,126 +2605,199 @@ def render_take(take_id: int):
         _fail_take(take_id, old_output, msg)
         return False, msg
 
+    # Legacy/bozuk veri savunmasi: _clean_cue_fields normal akista inf/NaN ve
+    # asiri buyuk start/end degerlerini zaten reddeder, ama DB'ye dogrudan
+    # enjekte edilmis eski/bozuk cue kayitlari yine de bulunabilir. ffmpeg
+    # between(t,a,inf) ifadesini sessizce gecerli kabul ettigi icin boyle bir
+    # replik sonsuz dongu ya da hataya degil, replik sesi pencere disina
+    # tasarak "done" durumuna dusebilir. Filter_complex kurulmadan once acikca
+    # reddet.
+    for rec in recordings:
+        s, e = rec["start_sec"], rec["end_sec"]
+        if not (math.isfinite(s) and math.isfinite(e)) or s > _MAX_CUE_SEC or e > _MAX_CUE_SEC:
+            msg = (
+                f"Başlangıcı {s:.1f} sn olan repliğin zaman bilgisi geçersiz, "
+                "montaj yapılamadı. Lütfen bu repliği düzenleyip tekrar deneyin."
+            )
+            print(
+                f"[uyari] take={take_id} gecersiz cue zaman degeri (start={s}, end={e}), montaj reddedildi",
+                file=sys.stderr,
+            )
+            _fail_take(take_id, old_output, msg)
+            return False, msg
+
     _set_take_status(take_id, "rendering", old_output, None)
 
-    ffmpeg_bin = _ffmpeg_bin()
-    has_audio = _video_has_audio(ffmpeg_bin, video_path)
+    # Bu noktadan sonra take DB'de "rendering" durumunda. Beklenmedik (yakalanmamis)
+    # bir istisna (orn. OverflowError, disk/izin hatasi) burada patlarsa take sonsuza
+    # dek "Montajlanıyor"da asili kalirdi (UI'da cikis yolu yok, kullanici take'i
+    # silmek zorunda kalirdi). Bu yuzden gerisi tek bir try/except ile sarili:
+    # her beklenmeyen hata _fail_take ile 'error' durumuna dusurulur.
+    try:
+        ffmpeg_bin = _ffmpeg_bin()
+        has_audio = _video_has_audio(ffmpeg_bin, video_path)
 
-    # keep_background=1 ve videonun ayrılmış arka plan dosyası varsa, replik
-    # aralığında sessizlik yerine arka plan sesi korunur. Kapalıysa (varsayılan)
-    # veya bg dosyası yoksa davranış tamamen eskisiyle aynı kalır (regresyon yok).
-    bg_path = None
-    if take["keep_background"] and video["bg_file"] and has_audio:
-        candidate = os.path.join(BG_DIR, safe_filename(video["bg_file"]))
-        if os.path.exists(candidate):
-            bg_path = candidate
+        # keep_background=1 ve videonun ayrılmış arka plan dosyası varsa, replik
+        # aralığında sessizlik yerine arka plan sesi korunur. Kapalıysa (varsayılan)
+        # veya bg dosyası yoksa davranış tamamen eskisiyle aynı kalır (regresyon yok).
+        bg_path = None
+        if take["keep_background"] and video["bg_file"] and has_audio:
+            candidate = os.path.join(BG_DIR, safe_filename(video["bg_file"]))
+            if os.path.exists(candidate):
+                bg_path = candidate
 
-    input_args = ["-i", video_path]
-    input_index = 1
-    bg_index = None
-    if bg_path:
-        base_index = 0
-        input_args += ["-i", bg_path]
-        bg_index = input_index
-        input_index += 1
-    elif has_audio:
-        base_index = 0
-    else:
-        base_index = input_index
-        input_args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
-        input_index += 1
+        input_args = ["-i", video_path]
+        input_index = 1
+        bg_index = None
+        if bg_path:
+            base_index = 0
+            input_args += ["-i", bg_path]
+            bg_index = input_index
+            input_index += 1
+        elif has_audio:
+            base_index = 0
+        else:
+            base_index = input_index
+            input_args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            input_index += 1
 
-    rec_indices = []
-    for rec in recordings:
-        rec_path = os.path.join(REC_DIR, safe_filename(rec["rec_filename"]))
-        input_args += ["-i", rec_path]
-        rec_indices.append(input_index)
-        input_index += 1
+        rec_indices = []
+        for rec in recordings:
+            rec_path = os.path.join(REC_DIR, safe_filename(rec["rec_filename"]))
+            input_args += ["-i", rec_path]
+            rec_indices.append(input_index)
+            input_index += 1
 
-    # Arka plan / orijinal ses kazanci (yuzde 0-150). 100 iken gain_f bos string
-    # kalir, yani uretilen filter_complex bugunkuyle birebir ayni olur (regresyon yok).
-    bg_gain = max(0, min(150, int(take["bg_volume"] if take["bg_volume"] is not None else 100))) / 100.0
-    gain_f = "" if abs(bg_gain - 1.0) < 1e-6 else f"volume={bg_gain:.3f},"
+        # Arka plan / orijinal ses kazanci (yuzde 0-150). 100 iken gain_f bos string
+        # kalir, yani uretilen filter_complex bugunkuyle birebir ayni olur (regresyon yok).
+        bg_gain = max(0, min(150, int(take["bg_volume"] if take["bg_volume"] is not None else 100))) / 100.0
+        gain_f = "" if abs(bg_gain - 1.0) < 1e-6 else f"volume={bg_gain:.3f},"
 
-    aformat = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
-    enable_expr = "+".join(f"between(t,{rec['start_sec']},{rec['end_sec']})" for rec in recordings)
-    filter_parts = [f"[{base_index}:a]{aformat},{gain_f}volume=0:enable='{enable_expr}'[base]"]
-    mix_labels = ["[base]"]
-    if bg_index is not None:
-        filter_parts.append(f"[{bg_index}:a]{aformat},{gain_f}volume=0:enable='not({enable_expr})'[bg]")
-        mix_labels.append("[bg]")
-    for i, rec in enumerate(recordings, start=1):
-        idx = rec_indices[i - 1]
-        delay_ms = int(round(float(rec["start_sec"]) * 1000))
-        filter_parts.append(f"[{idx}:a]{aformat},adelay={delay_ms}|{delay_ms}[a{i}]")
-        mix_labels.append(f"[a{i}]")
-    mix_inputs = "".join(mix_labels)
-    filter_parts.append(f"{mix_inputs}amix=inputs={len(mix_labels)}:duration=first:normalize=0[aout]")
-    filter_complex = ";".join(filter_parts)
+        # Dublaj kayitlarinin master seviyesi (yuzde 0-200) ve otomatik esitleme
+        # anahtari. Varsayilanlarda (dub_volume=100, auto_level=0) her iki deger
+        # de notr kalir -> filter_complex bugunkuyle birebir ayni olur (regresyon yok).
+        dub_master = max(0, min(200, int(take["dub_volume"] if take["dub_volume"] is not None else 100))) / 100.0
+        auto_on = bool(take["auto_level"])
+        auto_gains = _auto_level_gains(ffmpeg_bin, recordings) if auto_on else None
 
-    output_filename = f"{uuid.uuid4().hex}.mp4"
-    output_path = os.path.join(OUTPUTS_DIR, output_filename)
+        aformat = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+        enable_expr = "+".join(f"between(t,{rec['start_sec']},{rec['end_sec']})" for rec in recordings)
+        filter_parts = [f"[{base_index}:a]{aformat},{gain_f}volume=0:enable='{enable_expr}'[base]"]
+        mix_labels = ["[base]"]
+        if bg_index is not None:
+            filter_parts.append(f"[{bg_index}:a]{aformat},{gain_f}volume=0:enable='not({enable_expr})'[bg]")
+            mix_labels.append("[bg]")
+        max_gain = max(1.0, bg_gain)  # bg/orijinal ses boost'u da limiter tetiklemeli
+        for i, rec in enumerate(recordings, start=1):
+            idx = rec_indices[i - 1]
+            delay_ms = int(round(float(rec["start_sec"]) * 1000))
+            g = _effective_dub_gain(dub_master, rec, auto_gains, i - 1)
+            dgain_f = "" if abs(g - 1.0) < 1e-6 else f"volume={g:.3f},"
+            filter_parts.append(f"[{idx}:a]{aformat},{dgain_f}adelay={delay_ms}|{delay_ms}[a{i}]")
+            mix_labels.append(f"[a{i}]")
+            if g > max_gain:
+                max_gain = g
+        mix_inputs = "".join(mix_labels)
+        mix_chain = f"amix=inputs={len(mix_labels)}:duration=first:normalize=0"
+        limiter_on = max_gain > 1.0 + 1e-6 and _has_alimiter(ffmpeg_bin)
+        if limiter_on:
+            # limit=0.85: AAC (192k) teslimatinda intersample overshoot nedeniyle
+            # limiter kendi hedefine (PRE-AAC PCM'de olcum: limit=0.95 -> -0.4dB,
+            # 0.89 -> -1.0dB, 0.85 -> -1.4dB) ulassa bile kodlanmis dosyada 0 dBFS'e
+            # dokunan orneklerin tamamen onune gecilemiyor (bilinen kayipli kodek
+            # karakteristigi). Olculen (take=2, bg=150%): histogram_0db orneği
+            # limit=0.95'te 6462, 0.89'da 335, 0.85'te 38 (2.4M orneginin ~%0.0016'si)
+            # - politika geregi 0.85'in altina inilmiyor, bu deger en dusuk kalinti.
+            mix_chain += ",alimiter=limit=0.85:level=disabled:attack=5:release=50"
+        filter_parts.append(f"{mix_inputs}{mix_chain}[aout]")
+        filter_complex = ";".join(filter_parts)
 
-    base_cmd = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
-    base_cmd += input_args
-    base_cmd += ["-filter_complex", filter_complex, "-map", "0:v"]
-    tail_cmd = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
-    if not has_audio:
-        tail_cmd += ["-shortest"]
-    tail_cmd += [output_path]
+        print(
+            f"[montaj] take={take_id} bg={bg_gain:.2f} dub={dub_master:.2f} "
+            f"auto={int(auto_on)} max_gain={max_gain:.3f} limiter={int(limiter_on)}",
+            file=sys.stderr,
+        )
 
-    def _run(video_codec_args):
-        cmd = base_cmd + video_codec_args + tail_cmd
-        try:
-            return subprocess.run(
-                cmd, capture_output=True, text=True, errors="replace", timeout=1800
-            )
-        except subprocess.TimeoutExpired:
-            return None
+        output_filename = f"{uuid.uuid4().hex}.mp4"
+        output_path = os.path.join(OUTPUTS_DIR, output_filename)
 
-    proc = _run(["-c:v", "copy"])
-    if proc is None or proc.returncode != 0:
-        proc = _run(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"])
+        base_cmd = [ffmpeg_bin, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
+        base_cmd += input_args
+        base_cmd += ["-filter_complex", filter_complex, "-map", "0:v"]
+        tail_cmd = ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+        if not has_audio:
+            tail_cmd += ["-shortest"]
+        tail_cmd += [output_path]
 
-    if proc is None:
-        msg = "Montaj zaman aşımına uğradı"
+        def _run(video_codec_args):
+            cmd = base_cmd + video_codec_args + tail_cmd
+            try:
+                return subprocess.run(
+                    cmd, capture_output=True, text=True, errors="replace", timeout=1800
+                )
+            except subprocess.TimeoutExpired:
+                return None
+
+        proc = _run(["-c:v", "copy"])
+        if proc is None or proc.returncode != 0:
+            proc = _run(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"])
+
+        if proc is None:
+            msg = "Montaj zaman aşımına uğradı"
+            _fail_take(take_id, old_output, msg)
+            return False, msg
+
+        if proc.returncode != 0 or not os.path.exists(output_path):
+            msg = (proc.stderr or "Bilinmeyen ffmpeg hatası")[-500:]
+            _fail_take(take_id, old_output, msg)
+            return False, msg
+
+        _set_take_status(take_id, "done", output_filename, None)
+
+        conn = get_db()
+        conn.execute(
+            "UPDATE takes SET rendered_at = ?, rendered_rec_count = ? WHERE id = ?",
+            (datetime.now().isoformat(timespec="seconds"), len(recordings), take_id),
+        )
+        conn.commit()
+        conn.close()
+
+        # Yeniden montajda eski cikti artik hicbir yerden referans edilmiyor; diskte
+        # yetim kalmamasi icin sil. Silme basarisiz olsa bile (Windows'ta dosya
+        # acikken PermissionError, ya da baska bir OSError) montaj basarili sayilir:
+        # eski dosya diskte yetim kalir ama kullanici 'basarili montaj hata verdi'
+        # sanip kafasi karismaz, ve suanki oynatma akisi kirilmaz.
+        if old_output and old_output != output_filename:
+            old_path = os.path.join(OUTPUTS_DIR, safe_filename(old_output))
+            try:
+                if os.path.exists(old_path):
+                    os.remove(old_path)
+                    print(f"[bakim] eski montaj silindi: {old_output}", file=sys.stderr)
+            except OSError as exc:
+                print(f"[uyari] eski montaj silinemedi ({old_output}): {exc}", file=sys.stderr)
+
+        return True, "ok"
+    except Exception as exc:
+        msg = f"Beklenmeyen montaj hatası: {exc}"
+        traceback.print_exc(file=sys.stderr)
         _fail_take(take_id, old_output, msg)
         return False, msg
 
-    if proc.returncode != 0 or not os.path.exists(output_path):
-        msg = (proc.stderr or "Bilinmeyen ffmpeg hatası")[-500:]
-        _fail_take(take_id, old_output, msg)
-        return False, msg
 
-    _set_take_status(take_id, "done", output_filename, None)
-
-    conn = get_db()
-    conn.execute(
-        "UPDATE takes SET rendered_at = ? WHERE id = ?",
-        (datetime.now().isoformat(timespec="seconds"), take_id),
-    )
-    conn.commit()
-    conn.close()
-
-    # Yeniden montajda eski cikti artik hicbir yerden referans edilmiyor; diskte
-    # yetim kalmamasi icin sil.
-    if old_output and old_output != output_filename:
-        old_path = os.path.join(OUTPUTS_DIR, safe_filename(old_output))
-        if os.path.exists(old_path):
-            os.remove(old_path)
-            print(f"[bakim] eski montaj silindi: {old_output}", file=sys.stderr)
-
-    return True, "ok"
+def _clean_volume(raw, lo=0, hi=200):
+    """Form'dan gelen bir ses seviyesini [lo, hi] araligina kis; gecersizse None."""
+    if raw is None:
+        return None
+    try:
+        return max(lo, min(hi, int(float(raw))))
+    except (TypeError, ValueError, OverflowError):
+        # int(float("inf")) TypeError/ValueError degil OverflowError firlatir.
+        return None
 
 
 def _clean_bg_volume(raw):
     """Form'dan gelen arka plan seviyesini 0-150 araligina kis; gecersizse None."""
-    if raw is None:
-        return None
-    try:
-        return max(0, min(150, int(float(raw))))
-    except (TypeError, ValueError):
-        return None
+    return _clean_volume(raw, 0, 150)
 
 
 @app.post("/take/{take_id}/save")
@@ -2529,6 +2814,14 @@ def save_take(
         return RedirectResponse(url="/?error=" + quote("Take bulunamadı"), status_code=303)
 
     video_id = take["video_id"]
+
+    # Eszamanli tetikleme korumasi: rerender_take'teki ayni kontrol (bkz. orada
+    # ki yorum). Zaten calisiyorsa reddet, yetim cikti dosyasi birikmesin.
+    if take["status"] == "rendering":
+        conn.close()
+        msg = quote("Bu take zaten montajlanıyor; lütfen bitmesini bekleyin.")
+        return RedirectResponse(url=f"/dub/{video_id}?take={take_id}&error={msg}", status_code=303)
+
     rec_count = conn.execute(
         "SELECT COUNT(*) AS c FROM recordings WHERE take_id = ?", (take_id,)
     ).fetchone()["c"]
@@ -2563,17 +2856,33 @@ def save_take(
 
 
 @app.post("/take/{take_id}/rerender")
-def rerender_take(
-    take_id: int,
-    bg_volume: str = Form(None),
-    keep_background: str = Form(None),
-):
-    """Mevcut kayitlarla montaji yeniden calistir (ayarlar degistiyse gunceller)."""
+async def rerender_take(take_id: int, request: Request):
+    """Mevcut kayitlarla montaji yeniden calistir (ayarlar degistiyse gunceller).
+
+    rec_volume_{cue_id} alanlari dinamik oldugu icin (kac replik oldugu onceden
+    bilinmez) FastAPI'de tipli Form parametresi olarak tanimlanamaz; tum alanlar
+    request.form() uzerinden okunur. HTTP sozlesmesi degismez (take.html'deki
+    tek cagiran form ayni alan adlarini gonderiyor).
+    """
+    form = await request.form()
+    bg_volume = form.get("bg_volume")
+    keep_background = form.get("keep_background")
+    dub_volume = form.get("dub_volume")
+    auto_level = form.get("auto_level")
+
     conn = get_db()
     take = conn.execute("SELECT * FROM takes WHERE id = ?", (take_id,)).fetchone()
     if not take:
         conn.close()
         return RedirectResponse(url="/?error=" + quote("Take bulunamadı"), status_code=303)
+
+    # Eszamanli tetikleme korumasi: ayni take icin iki montaj birden calisirsa
+    # ikisi de kendi eski ciktisini yakalar, biri digerinin ciktisini referanssiz
+    # birakir (outputs/ altinda yetim .mp4 birikir). Zaten calisiyorsa reddet.
+    if take["status"] == "rendering":
+        conn.close()
+        msg = quote("Bu take zaten montajlanıyor; lütfen bitmesini bekleyin.")
+        return RedirectResponse(url=f"/take/{take_id}?error={msg}", status_code=303)
 
     rec_count = conn.execute(
         "SELECT COUNT(*) AS c FROM recordings WHERE take_id = ?", (take_id,)
@@ -2584,18 +2893,46 @@ def rerender_take(
         return RedirectResponse(url=f"/take/{take_id}?error={msg}", status_code=303)
 
     keep_bg = 1 if (keep_background or "").strip().lower() in ("1", "on", "true") else 0
+    auto_on = 1 if (auto_level or "").strip().lower() in ("1", "on", "true") else 0
     bg_vol = _clean_bg_volume(bg_volume)
-    if bg_vol is None:
-        conn.execute("UPDATE takes SET keep_background = ? WHERE id = ?", (keep_bg, take_id))
-    else:
+    dub_vol = _clean_volume(dub_volume, 0, 200)
+
+    set_clauses = ["keep_background = ?", "auto_level = ?"]
+    params = [keep_bg, auto_on]
+    if bg_vol is not None:
+        set_clauses.append("bg_volume = ?")
+        params.append(bg_vol)
+    if dub_vol is not None:
+        set_clauses.append("dub_volume = ?")
+        params.append(dub_vol)
+    params.append(take_id)
+    conn.execute(f"UPDATE takes SET {', '.join(set_clauses)} WHERE id = ?", params)
+
+    # rec_volume_{cue_id}: bilinmeyen/gecersiz cue_id'ler WHERE take_id = ? AND
+    # cue_id = ? ile zaten hicbir satira eslesmedigi icin sessizce yok sayilir.
+    for key, raw_val in form.multi_items():
+        if not key.startswith("rec_volume_"):
+            continue
+        cue_id_str = key[len("rec_volume_"):]
+        try:
+            cue_id = int(cue_id_str)
+        except (TypeError, ValueError):
+            continue
+        rec_vol = _clean_volume(raw_val, 0, 200)
+        if rec_vol is None:
+            continue
         conn.execute(
-            "UPDATE takes SET keep_background = ?, bg_volume = ? WHERE id = ?",
-            (keep_bg, bg_vol, take_id),
+            "UPDATE recordings SET volume = ? WHERE take_id = ? AND cue_id = ?",
+            (rec_vol, take_id, cue_id),
         )
+
     conn.commit()
     conn.close()
 
-    ok, message = render_take(take_id)
+    # render_take senkron ve bloklayici (ffmpeg subprocess.run + olcum): async
+    # route'ta dogrudan cagirilirsa event loop'u montaj boyunca (en kotu 1800 sn)
+    # dondurur. Threadpool'a tasi, event loop bosta kalsin.
+    ok, message = await run_in_threadpool(render_take, take_id)
     if ok:
         return RedirectResponse(url=f"/take/{take_id}", status_code=303)
     return RedirectResponse(
@@ -2629,20 +2966,35 @@ def take_detail(request: Request, take_id: int):
         "SELECT * FROM cues WHERE video_id = ? ORDER BY start_sec ASC", (take["video_id"],)
     ).fetchall()
     recs = conn.execute(
-        "SELECT cue_id, filename, created_at FROM recordings WHERE take_id = ?", (take_id,)
+        "SELECT cue_id, filename, created_at, volume FROM recordings WHERE take_id = ?", (take_id,)
     ).fetchall()
     conn.close()
 
+    # DIKKAT: burada cue_id INT anahtar olarak kullanilir (take.html:65 buna bagimli).
+    # api_take() ayni sozlugu STR anahtarla uretir (dub.html buna bagimli) - kasitli
+    # fark, degistirme (bkz. api_take() yorumu).
     recordings = {r["cue_id"]: f"/rec/{r['filename']}" for r in recs}
+    rec_volumes = {r["cue_id"]: (r["volume"] if r["volume"] is not None else 100) for r in recs}
 
-    # Son montajdan sonra kayit eklendi/degistirildi mi? (ISO zaman damgalari,
+    # Son montajdan sonra kayit eklendi/degistirildi/SILINDI mi? (ISO zaman damgalari,
     # ikisi de datetime.now().isoformat(timespec="seconds") ile yazilir.)
     # rendered_at NULL ise (bu migration'dan onceki take'ler) guvenli varsayilan:
     # uyari gosterme.
+    #
+    # Zaman damgasi karsilastirmasi tek basina kayit SILINMESINI goremez (silinen
+    # satirin created_at'i de onunla birlikte gider, kalanlarin created_at'i
+    # degismez). Bu yuzden montaj anindaki kayit sayisini da (rendered_rec_count)
+    # karsilastiriyoruz; sayi degistiyse (ekleme VEYA silme) uyari gosterilir.
+    # rendered_rec_count NULL ise (bu migrasyondan onceki take) sadece eski
+    # zaman damgasi kontrolune dusulur - geriye uyumlu, false-positive yok.
     recordings_changed = False
-    if recs and take["rendered_at"]:
-        last_rec = max((r["created_at"] or "") for r in recs)
-        recordings_changed = last_rec > take["rendered_at"]
+    if take["rendered_at"]:
+        rendered_rec_count = take["rendered_rec_count"]
+        if rendered_rec_count is not None and len(recs) != rendered_rec_count:
+            recordings_changed = True
+        elif recs:
+            last_rec = max((r["created_at"] or "") for r in recs)
+            recordings_changed = last_rec > take["rendered_at"]
 
     return templates.TemplateResponse(
         request,
@@ -2652,6 +3004,7 @@ def take_detail(request: Request, take_id: int):
             "video": video,
             "cues": cues,
             "recordings": recordings,
+            "rec_volumes": rec_volumes,
             "recordings_changed": recordings_changed,
             "error": request.query_params.get("error"),
         },

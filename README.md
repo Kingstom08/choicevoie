@@ -32,6 +32,25 @@ izlenip indirilebilir.
   ile montajdan önce tüm dublaj dinlenebilir.
 - **Öncekiler ve sonuç** (`/takes/{id}`, `/take/{id}`) — kaydedilmiş dublajlar, durum
   rozetleri, montajlanmış mp4'ü izleme ve indirme.
+- **Satır içi replik düzenleme** — admin panelinin replik tablosunda her satır üzerinde
+  başlangıç/bitiş süresi ve metni doğrudan düzenleyebilir, "Şu anki zamanı al" (⏱) düğmeleri,
+  Enter ile kaydet, Esc ile iptal; replik id'si korunur, mevcut dublaj kayıtları kopmaz.
+- **Toplu zaman kaydırma** — videodaki tüm replikleri ±X saniye kaydırma (sınır ihlalinde
+  reddetme, tümü-ya-hiçbiri politikası); kayıt varsa kullanıcıdan onay ister.
+- **Arka plan / video sesi seviyesi** — take başına `bg_volume` (0–150%); dublaj ekranında
+  ve öncekiler panelinde ayarlanabilir; orijinal video sesini replik aralığında bu seviyede
+  tutar (keep_background seçiliyse).
+- **Dublaj kayıtlarının ses seviyeleri** — üç katman çarpımsal denetimi:
+  - Take başına master (`dub_volume`, 0–200%), varsayılan 100%.
+  - Otomatik eşitleme (`auto_level` bayrağı) — kısık kayıtlar yükseltilir, yüksekler kısılır;
+    ölçülmüş etki: replikler arası standart sapma 3.372 dB → 0.681 dB (~4.95× azalma).
+  - Replik başına ince ayar (`recordings.volume`, 0–200%), varsayılan 100%.
+- **Öncekiler panelinde yeniden kayıt ve yeniden montaj** — her kayıtlı replik için orijinalini
+  dinleme, başka bir şey deneme (`/dub/{id}?take=X&cue=Y`), veya sadece ses ayarlarını değiştirip
+  montajı yeniden çalıştırma (kayıt yapmadan).
+- **Sabit video paneli** — dublaj ekranında (`/dub/{id}`) video oynatıcı, seviye çubuğu ve
+  mikrofon panel 900px veya daha geniş ekranlarda kaydırılsa da ekranda kalır, dar ekranlarda
+  daraltılır.
 
 ## Gereksinimler
 
@@ -158,6 +177,15 @@ temizlendiği için yetim kayıt birikmez.
 - Mikrofon erişimi `localhost` dışında HTTPS gerektirir.
 - Hafif (Demucs'suz) ses ayırma yöntemi stereo video gerektirir, mono videoda başarısız olur.
 - YouTube otomatik altyazıları zaman damgası olarak kayan/tutarsız biçimde gelebilir.
+- **Ön izlemede >100% ses seviyeleri uygulanamaz** — tarayıcıda `HTMLMediaElement.volume` maksimum
+  1.0 olduğu için, `dub_volume` veya `rec_volume` 100% üstüne ayarlı kayıtlar ön izlemede kısılır;
+  montajda tam değeri uygulanır.
+- **Montaj limiteri AAC taşmasını çoğunlukla engelliyor** — limiter miks çıkışını ~−1.4 dBFS'e
+  sınırlıyor (`alimiter`, `limit=0.85`). Buna rağmen kayıplı **AAC kodlaması** 0 dBFS'e yakın
+  örnekleri yeniden oluştururken nadiren tavana değebiliyor — codec karakteristiği, filtre hatası değil.
+  Ölçülen: 2.4 milyon örnek içinde 38 örnek.
+- **Kayıt uzunluğu repliğin zamanını aşabilir** — ffmpeg `adelay` filtresi başlangıcı kaydırır ancak
+  kaydın doğal uzunluğu kırpılmaz; sonraki boşluğa taşan replikler varsa ses çıkmazlığına neden olabilir.
 
 ## Proje yapısı
 

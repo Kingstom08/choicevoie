@@ -1,8 +1,8 @@
 # --- Kullanici verisi: asla depoya girmez ---
 uploads/
 outputs/
-choosvoie.db
-choosvoie.db-journal
+*.db
+*.db-journal
 _backup/
 
 # --- ffmpeg ikilisi (imageio-ffmpeg her platformda kendi surumunu getirir) ---

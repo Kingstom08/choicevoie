@@ -15,6 +15,8 @@
 
 {% set recs = recordings if (recordings is defined and recordings) else {} %}
 {% set bgv = take.bg_volume if (take.bg_volume is defined and take.bg_volume is not none) else 100 %}
+{% set dubv = take.dub_volume if (take.dub_volume is defined and take.dub_volume is not none) else 100 %}
+{% set recvols = rec_volumes if (rec_volumes is defined and rec_volumes) else {} %}
 
 {% macro rerender_panel() %}
 <section class="card">
@@ -43,6 +45,25 @@
                 <button type="button" class="btn" data-rv="0">Kapalı</button>
             </div>
         </div>
+        <div class="checkbox-row" style="margin-top:12px">
+            <label for="dvRange">Dublaj (kayıt) sesi seviyesi: <output id="dvLabel" for="dvRange">%{{ dubv }}</output></label>
+            <input type="range" name="dub_volume" id="dvRange" min="0" max="200" step="5" value="{{ dubv }}"
+                   style="width:230px;padding:0;accent-color:var(--acc)">
+            <div class="actions" style="margin-top:6px">
+                <button type="button" class="btn" data-dv="200">%200</button>
+                <button type="button" class="btn" data-dv="150">%150</button>
+                <button type="button" class="btn" data-dv="100">%100</button>
+                <button type="button" class="btn" data-dv="75">%75</button>
+            </div>
+        </div>
+        <div class="checkbox-row" style="margin-top:12px">
+            <label>
+                <input type="checkbox" name="auto_level" value="1" id="autoLevel" {% if take.auto_level %}checked{% endif %}>
+                Kayıt seviyelerini otomatik eşitle
+            </label>
+            <p class="muted">Kısık kayıtlar yükseltilir, yüksekler kısılır; replikler arası seviye farkı azalır.
+               İlk kullanımda kayıtlar ölçüleceği için montaj birkaç saniye uzayabilir.</p>
+        </div>
         <div class="actions" style="margin-top:14px">
             <button type="submit" class="btn btn-primary" id="rerenderBtn">Yeniden Montajla</button>
             <span class="muted" id="rerenderHint">Montaj birkaç saniye sürebilir.</span>
@@ -58,7 +79,7 @@
     <p class="muted">Beğenmediğin bir repliği yeniden kaydedip videoyu tekrar alabilirsin.</p>
     <table class="cue-table">
         <thead>
-            <tr><th>Zaman</th><th>Metin</th><th>Kayıt</th><th>İşlem</th></tr>
+            <tr><th>Zaman</th><th>Metin</th><th>Kayıt</th><th>Ses</th><th>İşlem</th></tr>
         </thead>
         <tbody>
             {% for c in cues %}
@@ -71,6 +92,15 @@
                     <audio controls preload="none" src="{{ rec_url }}"></audio>
                     {% else %}
                     <span class="badge badge-muted">Yok</span>
+                    {% endif %}
+                </td>
+                <td>
+                    {% if rec_url %}
+                    <input type="number" class="cue-vol" name="rec_volume_{{ c.id }}" form="rerenderForm"
+                           min="0" max="200" step="5" value="{{ recvols.get(c.id, 100) }}"
+                           aria-label="{{ c.text[:40] }} replik ses seviyesi (%)">
+                    {% else %}
+                    <span class="muted">—</span>
                     {% endif %}
                 </td>
                 <td>
@@ -153,6 +183,65 @@
         btn.textContent = 'Montajlanıyor... (birkaç saniye sürebilir)';
     });
     updateLabel();
+
+    const dvRange = document.getElementById('dvRange');
+    const dvLabel = document.getElementById('dvLabel');
+
+    function updateDvLabel() {
+        dvLabel.textContent = '%' + dvRange.value;
+        dvRange.setAttribute('aria-valuetext', dvLabel.textContent);
+    }
+
+    if (dvRange && dvLabel) {
+        dvRange.addEventListener('input', updateDvLabel);
+        form.querySelectorAll('[data-dv]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                dvRange.value = b.dataset.dv;
+                updateDvLabel();
+            });
+        });
+        updateDvLabel();
+    }
+
+    const autoLevel = document.getElementById('autoLevel');
+    const cueVolInputs = document.querySelectorAll('.cue-vol');
+
+    function updateAutoLevelHint() {
+        const on = !!(autoLevel && autoLevel.checked);
+        cueVolInputs.forEach(function (inp) {
+            inp.style.opacity = on ? '.6' : '';
+            inp.title = on ? 'Otomatik eşitlemenin üzerine ince ayar' : '';
+        });
+    }
+
+    if (autoLevel) {
+        autoLevel.addEventListener('change', updateAutoLevelHint);
+        updateAutoLevelHint();
+    }
+
+    cueVolInputs.forEach(function (inp) {
+        inp.addEventListener('input', function () {
+            const pct = parseInt(inp.value, 10);
+            const row = inp.closest('tr');
+            const audio = row ? row.querySelector('audio') : null;
+            if (audio && isFinite(pct)) {
+                audio.volume = Math.min(1, Math.max(0, pct) / 100);
+            }
+            let hint = row ? row.querySelector('.cue-vol-hint') : null;
+            if (isFinite(pct) && pct > 100) {
+                if (!hint) {
+                    hint = document.createElement('span');
+                    hint.className = 'muted cue-vol-hint';
+                    hint.style.display = 'block';
+                    hint.style.marginTop = '4px';
+                    hint.textContent = '%100 üstü ön izlenemez';
+                    inp.insertAdjacentElement('afterend', hint);
+                }
+            } else if (hint) {
+                hint.remove();
+            }
+        });
+    });
 })();
 </script>
 {% endblock %}
